@@ -35,3 +35,17 @@ class ChatResponse(BaseModel):
     # V2 Phase 3: drafting assistant — populated only when a draft was generated.
     # None for all non-drafting responses (backward-compatible).
     draft: Optional[str] = None
+    # V2 Phase 3.1: structured draft extraction.
+    # draftType  — identifies the request type being drafted.
+    #              Values: "LEAVE_REQUEST" | "LOAN_REQUEST" | "AUTHORIZATION_REQUEST"
+    #                      | "DOCUMENT_REQUEST" | "IMPROVE_TEXT"
+    #              None for all non-drafting responses (backward-compatible).
+    # draftFields — extracted field values keyed by field name.
+    #              Stable shape per draftType; null values for unextracted fields.
+    #              None only for IMPROVE_TEXT (no structured fields apply).
+    # missingFields — list of field names that could not be extracted from the
+    #              user's input. Empty list for non-drafting and IMPROVE_TEXT.
+    #              Spring Boot is responsible for final validation.
+    draftType: Optional[str] = None
+    draftFields: Optional[dict] = None
+    missingFields: List[str] = Field(default_factory=list)
