@@ -32,3 +32,6 @@ class ChatResponse(BaseModel):
     # V2 traceability: identifies which pipeline step produced this response.
     # Values: "local_rules" | "external_ai" | "fallback" | "refusal"
     source: Optional[str] = None
+    # V2 Phase 3: drafting assistant — populated only when a draft was generated.
+    # None for all non-drafting responses (backward-compatible).
+    draft: Optional[str] = None

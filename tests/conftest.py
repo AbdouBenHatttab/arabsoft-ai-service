@@ -85,5 +85,8 @@ def _isolate_provider_settings():
     ), patch(
         "app.clients.external_agent_client.settings",
         new=_SafeExternalAgentSettings(),
+    ), patch(
+        "app.services.drafting_service.settings",
+        new=_SafeGeminiSettings(),
     ):
         yield
