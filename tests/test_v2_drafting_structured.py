@@ -51,6 +51,7 @@ from app.services.drafting_service import (
     detect_drafting_intent,
     extract_draft_fields,
     get_draft_response,
+    normalize_date_to_iso,
 )
 
 client = TestClient(app)
@@ -458,8 +459,8 @@ def test_gemini_structured_fields_used_when_present():
     assert data["source"] == "external_ai"
     assert data["draftType"] == "LEAVE_REQUEST"
     assert data["draftFields"]["leaveType"] == "ANNUAL"
-    assert data["draftFields"]["startDate"] == "May 12"
-    assert data["draftFields"]["endDate"] == "May 14"
+    assert data["draftFields"]["startDate"] == "2026-05-12"
+    assert data["draftFields"]["endDate"] == "2026-05-14"
     assert data["draftFields"]["reason"] == "family appointment"
     assert data["missingFields"] == []
 
@@ -509,7 +510,7 @@ def test_gemini_null_structured_fields_adds_to_missing():
 
     assert data["draftType"] == "LEAVE_REQUEST"
     assert data["draftFields"]["leaveType"] is None
-    assert data["draftFields"]["startDate"] == "May 12"
+    assert data["draftFields"]["startDate"] == "2026-05-12"
     assert data["draftFields"]["endDate"] is None
     assert "leaveType" in data["missingFields"]
     assert "endDate" in data["missingFields"]
@@ -907,3 +908,211 @@ def test_fallback_response_has_no_drafttype():
     assert data["draftType"] is None
     assert data["draftFields"] is None
     assert data["missingFields"] == []
+
+
+# ===========================================================================
+# 29. Date normalization — ISO output for leave draft startDate / endDate
+# ===========================================================================
+
+def test_date_normalization_exact_bug_phrase():
+    """
+    Regression: exact phrase that triggered the Spring Boot 400 rejection.
+    FastAPI must return ISO yyyy-MM-dd dates, not raw 'May 12' / 'May 16' strings.
+    """
+    fields, missing = extract_draft_fields(
+        "I want annual leave from May 12 to May 16 for family vacation",
+        "LEAVE_REQUEST",
+    )
+    assert fields["leaveType"] == "ANNUAL"
+    # Dates must be ISO yyyy-MM-dd
+    import re
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert fields["startDate"] is not None, "startDate must not be None"
+    assert fields["endDate"] is not None, "endDate must not be None"
+    assert iso_re.match(fields["startDate"]), f"startDate not ISO: {fields['startDate']}"
+    assert iso_re.match(fields["endDate"]),   f"endDate not ISO: {fields['endDate']}"
+    # Specific expected values (current year is 2026; May 12/16 are in future or today)
+    assert fields["startDate"].endswith("-05-12"), f"Expected day 12 in May, got {fields['startDate']}"
+    assert fields["endDate"].endswith("-05-16"),   f"Expected day 16 in May, got {fields['endDate']}"
+    assert missing == []
+
+
+def test_date_normalization_iso_input_preserved():
+    """
+    When the user already provides full ISO dates they must be returned unchanged.
+    """
+    fields, missing = extract_draft_fields(
+        "I want annual leave from 2026-05-12 to 2026-05-16 for family vacation",
+        "LEAVE_REQUEST",
+    )
+    assert fields["startDate"] == "2026-05-12"
+    assert fields["endDate"]   == "2026-05-16"
+    assert missing == []
+
+
+def test_date_normalization_day_month_form():
+    """
+    '12 May' / '16 May' (day-first) format must also produce ISO dates.
+    """
+    fields, missing = extract_draft_fields(
+        "I want annual leave from 12 May to 16 May for family vacation",
+        "LEAVE_REQUEST",
+    )
+    import re
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert fields["startDate"] is not None
+    assert fields["endDate"]   is not None
+    assert iso_re.match(fields["startDate"]), f"startDate not ISO: {fields['startDate']}"
+    assert iso_re.match(fields["endDate"]),   f"endDate not ISO: {fields['endDate']}"
+    assert fields["startDate"].endswith("-05-12")
+    assert fields["endDate"].endswith("-05-16")
+    assert missing == []
+
+
+def test_date_normalization_non_draft_unaffected():
+    """
+    A generic help question must never become a LEAVE_REQUEST draft.
+    This confirms the fix does not break intent detection.
+    """
+    data = post_chat("EMPLOYEE", "How do I request leave?")
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+
+
+# ===========================================================================
+# 30. Relative date normalization
+# ===========================================================================
+
+def test_relative_tomorrow_normalized_to_iso():
+    """'starting tomorrow' should produce a real ISO startDate."""
+    from datetime import date, timedelta
+    import re
+    fields, missing = extract_draft_fields(
+        "Write a leave request for sick leave starting tomorrow because I have a medical appointment.",
+        "LEAVE_REQUEST",
+    )
+    assert fields["leaveType"] == "SICK"
+    assert fields["startDate"] is not None
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(fields["startDate"]), f"startDate not ISO: {fields['startDate']}"
+    expected = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == expected
+    assert fields["endDate"] is None
+    assert "endDate" in missing
+
+
+def test_relative_today_normalized_to_iso():
+    from datetime import date
+    fields, _ = extract_draft_fields(
+        "I want annual leave today because of personal reasons.",
+        "LEAVE_REQUEST",
+    )
+    expected = date.today().strftime("%Y-%m-%d")
+    assert fields["startDate"] == expected
+
+
+def test_relative_in_4_days_normalized_to_iso():
+    from datetime import date, timedelta
+    import re
+    fields, missing = extract_draft_fields(
+        "I want annual leave in 4 days for a family event.",
+        "LEAVE_REQUEST",
+    )
+    expected = (date.today() + timedelta(days=4)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == expected
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(fields["startDate"])
+
+
+def test_relative_after_tomorrow_normalized_to_iso():
+    from datetime import date, timedelta
+    fields, _ = extract_draft_fields(
+        "I want sick leave after tomorrow because I feel unwell.",
+        "LEAVE_REQUEST",
+    )
+    expected = (date.today() + timedelta(days=2)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == expected
+
+
+# ===========================================================================
+# 31. Duration-based range extraction
+# ===========================================================================
+
+def test_starting_tomorrow_for_4_days():
+    from datetime import date, timedelta
+    fields, missing = extract_draft_fields(
+        "I want annual leave starting tomorrow for 4 days because of vacation.",
+        "LEAVE_REQUEST",
+    )
+    tomorrow = date.today() + timedelta(days=1)
+    expected_end = (tomorrow + timedelta(days=3)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == tomorrow.strftime("%Y-%m-%d")
+    assert fields["endDate"] == expected_end
+    assert missing == [] or "reason" not in missing  # reason is extracted
+
+
+def test_from_tomorrow_for_4_days():
+    from datetime import date, timedelta
+    fields, missing = extract_draft_fields(
+        "I want annual leave from tomorrow for 4 days because of family vacation.",
+        "LEAVE_REQUEST",
+    )
+    tomorrow = date.today() + timedelta(days=1)
+    expected_end = (tomorrow + timedelta(days=3)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == tomorrow.strftime("%Y-%m-%d")
+    assert fields["endDate"] == expected_end
+
+
+def test_from_date_to_n_days_later():
+    from datetime import date, timedelta
+    import re
+    fields, missing = extract_draft_fields(
+        "I want annual leave from tomorrow to 4 days later for family event.",
+        "LEAVE_REQUEST",
+    )
+    tomorrow = date.today() + timedelta(days=1)
+    # "from tomorrow to 4 days later" -> endDate = tomorrow + 4 days
+    expected_end = (tomorrow + timedelta(days=4)).strftime("%Y-%m-%d")
+    assert fields["startDate"] == tomorrow.strftime("%Y-%m-%d")
+    assert fields["endDate"] == expected_end
+
+
+# ===========================================================================
+# 32. Vague phrases must NOT produce dates
+# ===========================================================================
+
+def test_next_week_produces_no_dates():
+    fields, missing = extract_draft_fields(
+        "I want annual leave next week for personal reasons.",
+        "LEAVE_REQUEST",
+    )
+    # "next week" is vague — must not produce an ISO date
+    assert fields["startDate"] is None
+    assert "startDate" in missing
+
+
+# ===========================================================================
+# 33. Tunisia/French numeric date format
+# ===========================================================================
+
+def test_tunisia_slash_format_dd_mm_yyyy():
+    import re
+    fields, missing = extract_draft_fields(
+        "I want annual leave from 12/05/2026 to 16/05/2026 for family vacation.",
+        "LEAVE_REQUEST",
+    )
+    assert fields["startDate"] == "2026-05-12"
+    assert fields["endDate"] == "2026-05-16"
+    assert missing == []
+
+
+def test_tunisia_dash_format_dd_mm_yyyy():
+    fields, missing = extract_draft_fields(
+        "I want annual leave from 12-05-2026 to 16-05-2026 for family vacation.",
+        "LEAVE_REQUEST",
+    )
+    assert fields["startDate"] == "2026-05-12"
+    assert fields["endDate"] == "2026-05-16"
+    assert missing == []
+

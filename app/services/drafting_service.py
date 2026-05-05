@@ -46,6 +46,7 @@ responses — drafting responses carry no relatedPages and need no route-strippi
 import json
 import logging
 import re
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -89,6 +90,36 @@ _DRAFT_VERBS: list[str] = [
     "prepare my",
     "create a",
     "create my",
+    # Direct-intent phrasing — user states what they want directly without
+    # the word "request". These combine with _DRAFT_SUBJECTS (leave types,
+    # "a loan", "authorization", etc.) to form a two-part match.
+    #
+    # Pattern: "<intent verb> <leave/loan/auth type>"
+    # e.g. "I want annual leave from May 12..."  -> "i want annual" + "annual leave" True
+    #      "I need sick leave for 2 days"         -> "i need sick"   + "sick leave"   True
+    #      "I need annual leave next week"         -> "i need annual" + "annual leave" True
+    #
+    # Non-drafting questions still return False because they lack both parts:
+    # "How do I request leave?"   -> no verb match from this group, no subject -> False
+    # "What is leave balance?"    -> no verb match at all                       -> False
+    "i want annual",
+    "i want sick",
+    "i want unpaid",
+    "i want maternity",
+    "i want paternity",
+    "i want to take",
+    "i need annual",
+    "i need sick",
+    "i need unpaid",
+    "i need maternity",
+    "i need paternity",
+    "i need to take",
+    "i would like annual",
+    "i would like sick",
+    "i would like unpaid",
+    "i would like maternity",
+    "i would like paternity",
+    "i would like to take",
     # Text-improvement verbs
     "improve",
     "make it more professional",
@@ -138,7 +169,7 @@ _DRAFT_SUBJECTS: list[str] = [
     "my text",
     "my request",
     # Bare type nouns used alongside preparation verbs
-    # e.g. "Help me request a loan …" / "I want to request annual leave …"
+    # e.g. "Help me request a loan ..." / "I want to request annual leave ..."
     "a loan",
     "annual leave",
     "sick leave",
@@ -164,9 +195,10 @@ def detect_drafting_intent(question: str) -> bool:
       - at least one drafting subject noun.
 
     This two-part check keeps precision high:
-      "How do I request a loan?"          → no verb match → False (navigation)
-      "Help me request a loan for 2000"   → "help me request" + "a loan" → True
-      "I want to request annual leave"    → "i want to request" + "annual leave" → True
+      "How do I request a loan?"          -> no verb match -> False (navigation)
+      "Help me request a loan for 2000"   -> "help me request" + "a loan" -> True
+      "I want to request annual leave"    -> "i want to request" + "annual leave" -> True
+      "I want annual leave from May 12"   -> "i want annual" + "annual leave" -> True
     """
     q = question.lower()
     has_verb = any(verb in q for verb in _DRAFT_VERBS)
@@ -184,8 +216,8 @@ _TYPE_IMPROVE = "IMPROVE_TEXT"
 # Strong document-type signals — these phrases unambiguously identify a
 # DOCUMENT_REQUEST even when "loan" appears as a purpose context.
 # e.g. "document request letter for a salary certificate for a bank loan"
-#   → "document request" and "salary certificate" are present → DOCUMENT_REQUEST
-#   → "bank loan" is purpose, not request type.
+#   -> "document request" and "salary certificate" are present -> DOCUMENT_REQUEST
+#   -> "bank loan" is purpose, not request type.
 _STRONG_DOCUMENT_SIGNALS: list[str] = [
     "document request",
     "salary certificate",
@@ -276,26 +308,198 @@ _AUTH_TYPES: list[tuple[str, list[str]]] = [
     ("medical", ["medical", "doctor", "hospital", "clinic"]),
 ]
 
-# Date patterns — extract raw strings; only ISO dates are normalized
+# ---------------------------------------------------------------------------
+# Date normalization  (ISO yyyy-MM-dd output for leave draft fields)
+# ---------------------------------------------------------------------------
+
+# Month name → month number (lower-case keys)
+_MONTH_MAP: dict[str, int] = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+# ISO date already in yyyy-MM-dd form
+_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+# "May 12", "May 12th", "12 May", "12th May" (no year)
+_MONTH_DAY_RE = re.compile(
+    r"^(?:"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r"|(\d{1,2})(?:st|nd|rd|th)?\s+"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+    r")$",
+    re.IGNORECASE,
+)
+
+# "May 12 2026", "May 12th 2026", "12 May 2026", "12th May 2026" (with full year)
+_MONTH_DAY_YEAR_RE = re.compile(
+    r"^(?:"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})"
+    r"|(\d{1,2})(?:st|nd|rd|th)?\s+"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"\s+(\d{4})"
+    r")$",
+    re.IGNORECASE,
+)
+
+# Tunisia/French numeric dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy (day-first ONLY, 4-digit year)
+_NUMERIC_DMY_RE = re.compile(
+    r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$"
+)
+
+# Relative: "today", "tomorrow", "after tomorrow", "day after tomorrow", "in N days"
+_RELATIVE_TODAY_RE = re.compile(r"^today$", re.IGNORECASE)
+_RELATIVE_TOMORROW_RE = re.compile(r"^tomorrow$", re.IGNORECASE)
+_RELATIVE_AFTER_TOMORROW_RE = re.compile(
+    r"^(?:day\s+after\s+tomorrow|after\s+tomorrow)$", re.IGNORECASE
+)
+_RELATIVE_IN_N_DAYS_RE = re.compile(r"^in\s+(\d+)\s+days?$", re.IGNORECASE)
+
+# Vague phrases that must NOT be normalized (return None)
+_VAGUE_RELATIVE_RE = re.compile(
+    r"^(?:next\s+week|next\s+month|soon|later|sometime|sometime\s+next|in\s+a\s+few|in\s+a\s+week)",
+    re.IGNORECASE,
+)
+
+
+def normalize_date_to_iso(raw: Optional[str]) -> Optional[str]:
+    """
+    Convert a raw date string to ISO yyyy-MM-dd format.
+
+    Supported inputs (strict rules — no mm/dd/yyyy, no 2-digit years):
+    1. ISO yyyy-MM-dd → returned as-is.
+    2. dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy → day-first numeric (Tunisia/French).
+    3. "Month Day [Year]" / "Day Month [Year]" → named-month forms.
+       Without year: infer current year; if in the past, use next year.
+    4. Relative clear anchors: today, tomorrow, after tomorrow,
+       day after tomorrow, in N days.
+    5. Vague relative phrases (next week, soon, later, etc.) → None.
+    6. Any other form → None  (caller adds to missingFields).
+
+    This function is PURE — no DB, no network, no business rules.
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+
+    # 1. Already ISO yyyy-MM-dd
+    m = _ISO_RE.match(raw)
+    if m:
+        try:
+            date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return raw
+        except ValueError:
+            return None
+
+    # 2. Vague relative — must be tested BEFORE relative anchors
+    if _VAGUE_RELATIVE_RE.match(raw):
+        return None
+
+    # 3. Clear relative anchors
+    today_date = date.today()
+    if _RELATIVE_TODAY_RE.match(raw):
+        return today_date.strftime("%Y-%m-%d")
+    if _RELATIVE_TOMORROW_RE.match(raw):
+        return (today_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    if _RELATIVE_AFTER_TOMORROW_RE.match(raw):
+        return (today_date + timedelta(days=2)).strftime("%Y-%m-%d")
+    m = _RELATIVE_IN_N_DAYS_RE.match(raw)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 365:  # sanity cap
+            return (today_date + timedelta(days=n)).strftime("%Y-%m-%d")
+        return None
+
+    # 4. Tunisia/French numeric: dd/mm/yyyy (day-first, 4-digit year only)
+    m = _NUMERIC_DMY_RE.match(raw)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # 5. Named-month + day + explicit 4-digit year
+    m = _MONTH_DAY_YEAR_RE.match(raw)
+    if m:
+        if m.group(1):  # "May 12 2026" form
+            month_name, day, year = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+        else:           # "12 May 2026" form
+            month_name, day, year = m.group(5).lower(), int(m.group(4)), int(m.group(6))
+        month_num = _MONTH_MAP.get(month_name)
+        if month_num is None:
+            return None
+        try:
+            return date(year, month_num, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # 6. Named-month + day (no year) — infer year
+    m = _MONTH_DAY_RE.match(raw)
+    if m:
+        if m.group(1):  # "May 12" form
+            month_name = m.group(1).lower()
+            day = int(m.group(2))
+        else:           # "12 May" form
+            month_name = m.group(4).lower()
+            day = int(m.group(3))
+
+        month_num = _MONTH_MAP.get(month_name)
+        if month_num is None:
+            return None
+
+        year = today_date.year
+        try:
+            candidate = date(year, month_num, day)
+        except ValueError:
+            return None
+
+        # If the date has already passed this year, push to next year
+        if candidate < today_date:
+            try:
+                candidate = date(year + 1, month_num, day)
+            except ValueError:
+                return None
+
+        return candidate.strftime("%Y-%m-%d")
+
+    # 7. All other forms → unparseable → None
+    return None
+
+
+# Date patterns — extract raw strings; normalize_date_to_iso handles conversion
+# Order matters: more specific patterns before less specific.
 _DATE_PATTERNS = [
-    # ISO date: 2026-05-12 — safe to keep as-is
+    # ISO date: 2026-05-12
     re.compile(r"\b(\d{4}-\d{2}-\d{2})\b"),
-    # DD/MM/YYYY or MM/DD/YYYY — keep as raw string, don't interpret
-    re.compile(r"\b(\d{1,2}/\d{1,2}/\d{4})\b"),
-    # "May 12", "12 May", "May 12th"
+    # Tunisia/French numeric: dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy (4-digit year)
+    re.compile(r"\b(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{4})\b"),
+    # Named month + day + 4-digit year: "May 12 2026", "12 May 2026"
     re.compile(
         r"\b((?:january|february|march|april|may|june|july|august|september|october|november|december)"
-        r"\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}(?:st|nd|rd|th)?\s+"
+        r"\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}"
+        r"|\d{1,2}(?:st|nd|rd|th)?\s+"
+        r"(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+\d{4})\b",
+        re.IGNORECASE,
+    ),
+    # Named month + day (no year): "May 12", "12 May", "May 12th"
+    re.compile(
+        r"\b((?:january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+\d{1,2}(?:st|nd|rd|th)?"
+        r"|\d{1,2}(?:st|nd|rd|th)?\s+"
         r"(?:january|february|march|april|may|june|july|august|september|october|november|december))\b",
         re.IGNORECASE,
     ),
-    # Relative: tomorrow, next Monday, next week, etc.
+    # Relative: day after tomorrow, after tomorrow, tomorrow, today, in N days
     re.compile(
-        r"\b(tomorrow|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month))\b",
+        r"\b(day\s+after\s+tomorrow|after\s+tomorrow|tomorrow|today|in\s+\d+\s+days?)\b",
         re.IGNORECASE,
     ),
-    # "the 15th", "the 3rd"
-    re.compile(r"\bthe\s+(\d{1,2}(?:st|nd|rd|th))\b", re.IGNORECASE),
 ]
 
 # Time patterns: "10h", "10:00", "10am", "10 AM", "10h30"
@@ -427,6 +631,184 @@ def _extract_purpose(text: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Leave date range extraction (handles relative dates + duration arithmetic)
+# ---------------------------------------------------------------------------
+
+# Patterns for "from X to Y" / "from X until Y" / "X to Y"
+_RANGE_FROM_TO_RE = re.compile(
+    r"(?:from\s+)?(.+?)\s+(?:to|until|till|--)\s+(.+?)(?:\s+(?:for|because|reason|to\s+attend)|$)",
+    re.IGNORECASE,
+)
+
+# "for N days" or "N days" duration
+_DURATION_DAYS_RE = re.compile(
+    r"(?:for\s+)?(\d+)\s+days?",
+    re.IGNORECASE,
+)
+
+# "starting X for N days" / "from X for N days"
+_START_PLUS_DURATION_RE = re.compile(
+    r"(?:starting|from)\s+(.+?)\s+for\s+(\d+)\s+days?",
+    re.IGNORECASE,
+)
+
+# "for N days starting X"
+_DURATION_THEN_START_RE = re.compile(
+    r"for\s+(\d+)\s+days?\s+starting\s+(.+?)(?:\s+(?:because|reason|to\s+attend)|$)",
+    re.IGNORECASE,
+)
+
+# "from X to N days later" / "from X for N days later"
+_FROM_X_TO_N_DAYS_LATER_RE = re.compile(
+    r"from\s+(.+?)\s+(?:to|for)\s+(\d+)\s+days?\s+later",
+    re.IGNORECASE,
+)
+
+# Single date: "until X" (endDate only)
+_UNTIL_ONLY_RE = re.compile(
+    r"(?:until|till)\s+(.+?)(?:\s+(?:for|because|reason)|$)",
+    re.IGNORECASE,
+)
+
+# "leave tomorrow" / "leave today" as standalone (one-day, startDate = endDate)
+_SINGLE_LEAVE_DAY_RE = re.compile(
+    r"(?:leave|absence)\s+(today|tomorrow|day\s+after\s+tomorrow|after\s+tomorrow|in\s+\d+\s+days?)",
+    re.IGNORECASE,
+)
+
+
+def _raw_date_token(text: str) -> Optional[str]:
+    """
+    Extract the first date-like token from text using the date patterns.
+    Returns the raw matched string, or None if nothing matches.
+    """
+    text = text.strip()
+    for pattern in _DATE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            val = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+            return val.strip()
+    return None
+
+
+def _compute_end_from_start_and_duration(start_iso: str, n_days: int) -> Optional[str]:
+    """
+    Given an ISO start date and an inclusive duration in days, compute the ISO end date.
+    "for 4 days starting tomorrow" => endDate = startDate + 3 days (inclusive).
+    """
+    try:
+        start = date.fromisoformat(start_iso)
+        end = start + timedelta(days=n_days - 1)
+        return end.strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        return None
+
+
+def _compute_end_from_start_plus_n(start_iso: str, n_days: int) -> Optional[str]:
+    """
+    Given an ISO start date, compute the ISO end date by adding exactly N days.
+    "from tomorrow to 4 days later" => endDate = startDate + 4 days.
+    """
+    try:
+        start = date.fromisoformat(start_iso)
+        end = start + timedelta(days=n_days)
+        return end.strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        return None
+
+
+def _extract_leave_date_range(question: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extract and normalize (startDate, endDate) from a leave request question.
+
+    Handles these patterns (in priority order):
+    1. "from X to Y days later"   → startDate=X, endDate=X+Y days (additive, not inclusive)
+    2. "starting X for N days" / "from X for N days"  → startDate=X, endDate=X+(N-1)
+    3. "for N days starting X"    → same as above
+    4. "from X to Y" / "X to Y"   → startDate=X, endDate=Y (standard range)
+    5. "until Y" alone            → endDate=Y, startDate=None
+    6. Single one-day relative    → startDate=endDate=that date
+    7. Any two raw dates in order → startDate=first, endDate=second
+    8. Single date                → startDate=that date, endDate=None
+    9. No dates                   → None, None
+
+    All returned dates are ISO yyyy-MM-dd or None.
+    """
+    q = question
+
+    # Pattern 1: "from X to N days later" / "from X for N days later"
+    # Semantic: endDate = startDate + N calendar days (NOT inclusive subtraction)
+    m = _FROM_X_TO_N_DAYS_LATER_RE.search(q)
+    if m:
+        raw_start = _raw_date_token(m.group(1))
+        n = int(m.group(2))
+        start_iso = normalize_date_to_iso(raw_start)
+        if start_iso:
+            end_iso = _compute_end_from_start_plus_n(start_iso, n)
+            return start_iso, end_iso
+
+    # Pattern 2: "starting X for N days" / "from X for N days"
+    m = _START_PLUS_DURATION_RE.search(q)
+    if m:
+        raw_start = _raw_date_token(m.group(1))
+        n = int(m.group(2))
+        start_iso = normalize_date_to_iso(raw_start)
+        if start_iso:
+            end_iso = _compute_end_from_start_and_duration(start_iso, n)
+            return start_iso, end_iso
+
+    # Pattern 3: "for N days starting X"
+    m = _DURATION_THEN_START_RE.search(q)
+    if m:
+        n = int(m.group(1))
+        raw_start = _raw_date_token(m.group(2))
+        start_iso = normalize_date_to_iso(raw_start)
+        if start_iso:
+            end_iso = _compute_end_from_start_and_duration(start_iso, n)
+            return start_iso, end_iso
+
+    # Pattern 4: "from X to Y" / "from X until Y" / plain "X to Y"
+    # Try to find two distinct date tokens linked by to/until
+    m = _RANGE_FROM_TO_RE.search(q)
+    if m:
+        raw_start = _raw_date_token(m.group(1))
+        raw_end   = _raw_date_token(m.group(2))
+        if raw_start and raw_end:
+            start_iso = normalize_date_to_iso(raw_start)
+            end_iso   = normalize_date_to_iso(raw_end)
+            if start_iso or end_iso:  # at least one parsed — use what we have
+                return start_iso, end_iso
+
+    # Pattern 5: "until Y" alone (endDate only)
+    m = _UNTIL_ONLY_RE.search(q)
+    if m:
+        raw_end = _raw_date_token(m.group(1))
+        end_iso = normalize_date_to_iso(raw_end)
+        if end_iso:
+            return None, end_iso
+
+    # Pattern 6: single one-day relative phrase like "leave tomorrow"
+    m = _SINGLE_LEAVE_DAY_RE.search(q)
+    if m:
+        raw = m.group(1)
+        iso = normalize_date_to_iso(raw)
+        if iso:
+            return iso, iso  # one-day absence: startDate == endDate
+
+    # Pattern 7 & 8: fallback — scan all date tokens in order
+    raw_dates = _extract_dates(q)
+    if len(raw_dates) >= 2:
+        start_iso = normalize_date_to_iso(raw_dates[0])
+        end_iso   = normalize_date_to_iso(raw_dates[1])
+        return start_iso, end_iso
+    if len(raw_dates) == 1:
+        start_iso = normalize_date_to_iso(raw_dates[0])
+        return start_iso, None
+
+    return None, None
+
+
 def extract_draft_fields(
     question: str, draft_type: str
 ) -> tuple[Optional[dict], list[str]]:
@@ -450,10 +832,10 @@ def extract_draft_fields(
 
     if draft_type == _TYPE_LEAVE:
         leave_type = _extract_leave_type(question)
-        dates = _extract_dates(question)
-        start_date = dates[0] if len(dates) > 0 else None
-        end_date = dates[1] if len(dates) > 1 else None
         reason = _extract_reason(question)
+
+        # --- Smart date range extraction ---
+        start_date, end_date = _extract_leave_date_range(question)
 
         fields: dict = {
             "leaveType": leave_type,
@@ -669,7 +1051,12 @@ structuredFields schema by draftType:
   IMPROVE_TEXT:
     structuredFields must be null (no structured fields for text improvement).
 
-Dates: return raw strings as stated by the user (e.g. "May 12", "tomorrow", "next Monday").
+Dates for LEAVE_REQUEST: normalize startDate and endDate to ISO yyyy-MM-dd format.
+  Supported: ISO dates, "Month Day"/"Day Month" (infer current year, push to next if past),
+  dd/mm/yyyy day-first numeric (Tunisia/French), relative anchors (today, tomorrow,
+  after tomorrow, day after tomorrow, in N days). Vague phrases (next week, soon, later)
+  must be null. Use null for any date you cannot normalize.
+Dates for other types: return raw strings as stated by the user.
 Times: normalize to HH:MM format when safely possible (e.g. "10h" -> "10:00").
 Amounts: include the currency unit if stated (e.g. "2000 TND").
 
@@ -836,6 +1223,10 @@ def _resolve_structured_fields(
         missing: list[str] = []
         for key in expected_keys:
             val = gemini_structured.get(key)  # None if absent
+            # For LEAVE_REQUEST dates, always normalize to ISO so Spring Boot
+            # LocalDate parsing succeeds even if Gemini returned raw strings.
+            if draft_type == _TYPE_LEAVE and key in ("startDate", "endDate") and val is not None:
+                val = normalize_date_to_iso(val)
             fields[key] = val
             if val is None:
                 missing.append(key)

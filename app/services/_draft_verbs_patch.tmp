@@ -1,0 +1,72 @@
+_DRAFT_VERBS: list[str] = [
+    # Classic composition verbs
+    "draft",
+    "write",
+    "compose",
+    "help me write",
+    "help me draft",
+    "help me compose",
+    # Request-preparation phrasing — user wants to build / prepare a request,
+    # not just navigate to the request page.
+    "help me request",
+    "help me create",
+    "help me prepare",
+    "help me submit",
+    "i want to request",
+    "i need to request",
+    "i would like to request",
+    "prepare a",
+    "prepare my",
+    "create a",
+    "create my",
+    # Direct-intent phrasing — user states what they want directly, without
+    # the word "request". These combine with _DRAFT_SUBJECTS (leave types,
+    # "a loan", "authorization", etc.) to form a two-part match.
+    #
+    # Pattern: "<intent verb> <leave/loan/auth type>"
+    # e.g. "I want annual leave from May 12…"  → "i want annual" + "annual leave" ✓
+    #      "I need sick leave for 2 days"        → "i need sick"   + "sick leave"   ✓
+    #      "I need annual leave next week"        → "i need annual" + "annual leave" ✓
+    #
+    # Non-drafting questions still return False because they lack both parts:
+    # "How do I request leave?"   → no verb match from this group, no subject → False
+    # "What is leave balance?"    → no verb match at all                      → False
+    "i want annual",
+    "i want sick",
+    "i want unpaid",
+    "i want maternity",
+    "i want paternity",
+    "i want to take",
+    "i need annual",
+    "i need sick",
+    "i need unpaid",
+    "i need maternity",
+    "i need paternity",
+    "i need to take",
+    "i would like annual",
+    "i would like sick",
+    "i would like unpaid",
+    "i would like maternity",
+    "i would like paternity",
+    "i would like to take",
+    # Text-improvement verbs
+    "improve",
+    "make it more professional",
+    "make this more professional",
+    "make this message more professional",
+    "make this professional",
+    "rephrase",
+    "rewrite",
+    "polish",
+    "refine",
+    "suggest wording",
+    "suggest text",
+    "how should i phrase",
+    "how do i phrase",
+    "what should i write",
+    "what should i say",
+    "professional version",
+    "professional wording",
+    "formal version",
+    "formal wording",
+]
