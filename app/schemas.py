@@ -8,7 +8,83 @@ class RelatedPage(BaseModel):
     route: str
 
 
+# ---------------------------------------------------------------------------
+# Context sub-models matching the SafeAssistantContext Spring Boot DTO
+# ---------------------------------------------------------------------------
+
+class EmployeeContext(BaseModel):
+    """
+    Personal employee context — present for EMPLOYEE and TEAM_LEADER roles.
+    All fields are optional because Spring Boot may omit them when a service
+    fails during context assembly.  Defaults to None / 0 rather than failing.
+    """
+    annualAvailableDays: Optional[int] = None
+    sickAvailableDays: Optional[int] = None
+    totalPendingRequests: Optional[int] = 0
+    leavesPending: Optional[int] = 0
+    documentsPending: Optional[int] = 0
+    loansPending: Optional[int] = 0
+    authorizationsPending: Optional[int] = 0
+
+
+class TeamContext(BaseModel):
+    """
+    Safe team summary — present for TEAM_LEADER role only.
+    Sub-fields may be None when the Team Leader has no team assigned yet.
+
+    pendingTeamLeaderApprovals defaults to None (not 0) so that an absent key
+    is distinguishable from an explicit zero.  The Q&A handler treats:
+      - None  -> value unknown; guide user to the page, never invent a count.
+      - 0     -> confirmed zero; say the queue is clear.
+      - N > 0 -> confirmed count; state the exact number.
+    """
+    teamName: Optional[str] = None
+    memberCount: Optional[int] = None
+    pendingTeamLeaderApprovals: Optional[int] = None
+
+
+class HrContext(BaseModel):
+    """
+    HR management context — present for HR_MANAGER role only.
+    All fields are platform-wide aggregate counts — never individual employee data.
+    """
+    totalPendingActions: Optional[int] = 0
+    leavesPending: Optional[int] = 0
+    documentsPending: Optional[int] = 0
+    loansPending: Optional[int] = 0
+    authorizationsPending: Optional[int] = 0
+    newUsersPendingApproval: Optional[int] = 0
+
+
 class ContextInfo(BaseModel):
+    """
+    Typed safe context forwarded from Spring Boot.
+
+    Spring Boot now sends a nested SafeAssistantContext shape with three
+    role-specific sub-objects.  The old flat shape (leave / requests / tasks / routes)
+    is preserved as optional fields with empty defaults so that any existing test
+    fixtures that pass the old shape continue to deserialise without error.
+
+    Nullability contract (mirrors SafeAssistantContext.java):
+      - employee : non-null for EMPLOYEE and TEAM_LEADER; null for HR_MANAGER / NEW_USER.
+      - team     : non-null for TEAM_LEADER; null for all other roles.
+      - hr       : non-null for HR_MANAGER; null for all other roles.
+      - displayName: first + last name only — never used in answers but may be logged.
+
+    Legacy flat fields (kept for backward-compatible test fixtures):
+      - leave    : old {"balance": N} shape — still parsed but no longer used
+                   by new handlers (they read employee.annualAvailableDays instead).
+      - requests : old flat requests map — unused by new handlers.
+      - tasks    : unused.
+      - routes   : unused.
+    """
+    # New typed sub-objects
+    displayName: Optional[str] = None
+    employee: Optional[EmployeeContext] = None
+    team: Optional[TeamContext] = None
+    hr: Optional[HrContext] = None
+
+    # Legacy flat fields — kept for backward compatibility with old test fixtures
     leave: Optional[Dict[str, Any]] = Field(default_factory=dict)
     requests: Optional[Dict[str, Any]] = Field(default_factory=dict)
     tasks: Optional[Dict[str, Any]] = Field(default_factory=dict)
