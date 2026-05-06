@@ -1216,3 +1216,321 @@ def test_employee_team_availability_handler_does_not_fire():
     assert "/team/calendar" not in routes, (
         f"/team/calendar appeared for EMPLOYEE team-availability question: {routes}"
     )
+
+
+# ===========================================================================
+# HR-1. HR_MANAGER user management routing (v1.10)
+# ===========================================================================
+
+def test_hr_manage_users_points_to_user_management():
+    """'Where can I manage users?' -> User Management, not employee routes."""
+    data = post_chat("HR_MANAGER", "Where can I manage users?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/hr/users" in routes, f"Expected /hr/users: {routes}"
+    # Must NOT include any /employee/* routes
+    for route in routes:
+        assert not route.startswith("/employee/"), (
+            f"Employee route leaked into HR user management answer: {route}"
+        )
+
+
+def test_hr_manage_employees_points_to_user_management():
+    """'How do I manage employees?' -> User Management."""
+    data = post_chat("HR_MANAGER", "How do I manage employees?")
+    assert data["source"] == "local_rules"
+    assert "/hr/users" in _routes(data)
+
+
+def test_hr_activate_users_points_to_user_management():
+    """'Where can I activate users?' -> User Management."""
+    data = post_chat("HR_MANAGER", "Where can I activate users?")
+    assert data["source"] == "local_rules"
+    assert "/hr/users" in _routes(data)
+
+
+def test_hr_assign_roles_points_to_user_management():
+    """'Where do I assign roles?' -> User Management."""
+    data = post_chat("HR_MANAGER", "Where do I assign roles?")
+    assert data["source"] == "local_rules"
+    assert "/hr/users" in _routes(data)
+
+
+def test_hr_approve_new_users_points_to_user_management():
+    """'Where can I approve new users?' -> User Management."""
+    data = post_chat("HR_MANAGER", "Where can I approve new users?")
+    assert data["source"] == "local_rules"
+    assert "/hr/users" in _routes(data)
+
+
+def test_hr_user_management_answer_mentions_roles_and_onboarding():
+    """Answer must mention roles and onboarding."""
+    data = post_chat("HR_MANAGER", "Where can I manage users?")
+    answer_lower = data["answer"].lower()
+    assert "role" in answer_lower or "onboard" in answer_lower, (
+        f"Expected roles/onboarding mention: {data['answer']}"
+    )
+
+
+# ===========================================================================
+# HR-2. HR_MANAGER document management routing
+# ===========================================================================
+
+def test_hr_manage_documents_points_to_hr_requests():
+    """'Where can I manage documents?' -> All HR Requests, not My Documents."""
+    data = post_chat("HR_MANAGER", "Where can I manage documents?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/hr/requests" in routes, f"Expected /hr/requests: {routes}"
+    assert "/employee/documents" not in routes, (
+        f"/employee/documents must not appear for HR document management: {routes}"
+    )
+
+
+def test_hr_handle_document_requests_points_to_hr_requests():
+    """'Where do I handle document requests?' -> All HR Requests."""
+    data = post_chat("HR_MANAGER", "Where do I handle document requests?")
+    assert data["source"] == "local_rules"
+    assert "/hr/requests" in _routes(data)
+    assert "/employee/documents" not in _routes(data)
+
+
+def test_hr_upload_document_points_to_hr_requests():
+    """'Where can HR upload documents?' -> All HR Requests."""
+    data = post_chat("HR_MANAGER", "Where can HR upload documents?")
+    assert data["source"] == "local_rules"
+    assert "/hr/requests" in _routes(data)
+
+
+def test_hr_prepare_certificate_points_to_hr_requests():
+    """'Where can I prepare certificates?' -> All HR Requests."""
+    data = post_chat("HR_MANAGER", "Where can I prepare certificates?")
+    assert data["source"] == "local_rules"
+    assert "/hr/requests" in _routes(data)
+
+
+def test_hr_document_answer_mentions_notification_to_employee():
+    """HR document answer must mention that the employee is notified."""
+    data = post_chat("HR_MANAGER", "Where can I manage documents?")
+    answer_lower = data["answer"].lower()
+    assert "notification" in answer_lower or "notif" in answer_lower or "email" in answer_lower, (
+        f"Expected employee notification mention: {data['answer']}"
+    )
+
+
+# ===========================================================================
+# HR-3. Working time is role-aware for HR_MANAGER
+# ===========================================================================
+
+def test_hr_working_time_mentions_hours():
+    """HR_MANAGER 'What is working time?' mentions 08:00-11:00 and 13:00-16:00."""
+    data = post_chat("HR_MANAGER", "What is working time?")
+    assert data["source"] == "local_rules"
+    answer = data["answer"]
+    assert "08:00" in answer, f"Expected 08:00 in answer: {answer}"
+    assert "11:00" in answer, f"Expected 11:00 in answer: {answer}"
+    assert "13:00" in answer, f"Expected 13:00 in answer: {answer}"
+    assert "16:00" in answer, f"Expected 16:00 in answer: {answer}"
+
+
+def test_hr_working_time_has_no_employee_routes():
+    """HR_MANAGER working-time answer must not include My Leave Requests, My Loans, My Calendar."""
+    data = post_chat("HR_MANAGER", "What is working time?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/leave" not in routes, (
+        f"/employee/leave must not appear for HR working-time: {routes}"
+    )
+    assert "/employee/loans" not in routes, (
+        f"/employee/loans must not appear for HR working-time: {routes}"
+    )
+    assert "/employee/calendar" not in routes, (
+        f"/employee/calendar must not appear for HR working-time: {routes}"
+    )
+
+
+def test_hr_working_time_has_hr_routes():
+    """HR_MANAGER working-time answer must include HR Dashboard and/or All HR Requests."""
+    data = post_chat("HR_MANAGER", "What is working time?")
+    routes = _routes(data)
+    assert "/hr/dashboard" in routes or "/hr/requests" in routes, (
+        f"Expected HR routes in working-time answer: {routes}"
+    )
+
+
+def test_employee_working_time_still_has_personal_links():
+    """EMPLOYEE working-time answer must still include My Leave Requests and My Loans."""
+    data = post_chat("EMPLOYEE", "What is working time?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/leave" in routes, f"Expected /employee/leave: {routes}"
+    assert "/employee/loans" in routes, f"Expected /employee/loans: {routes}"
+    assert "/employee/calendar" not in routes
+    assert "/hr/dashboard" not in routes, (
+        f"HR route must not appear for EMPLOYEE working-time: {routes}"
+    )
+
+
+def test_tl_working_time_has_personal_links_not_team_calendar():
+    """TEAM_LEADER working-time answer has personal links only, not Team Leave Calendar."""
+    data = post_chat("TEAM_LEADER", "What is working time?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/leave" in routes
+    assert "/employee/loans" in routes
+    assert "/team/calendar" not in routes, (
+        f"Team Leave Calendar must not appear in TL working-time answer: {routes}"
+    )
+    assert "/hr/dashboard" not in routes
+
+
+# ===========================================================================
+# HR-4. Existing HR redirects still work
+# ===========================================================================
+
+def test_hr_annual_leave_balance_still_redirected():
+    """HR_MANAGER asking personal leave balance still gets management redirect."""
+    data = post_chat("HR_MANAGER", "What is my annual leave balance?", {})
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower, (
+        f"Expected management redirect: {data['answer']}"
+    )
+
+
+def test_hr_pending_actions_still_uses_context():
+    """HR pending actions count still reads context.hr.totalPendingActions."""
+    data = post_chat(
+        "HR_MANAGER",
+        "How many HR actions are pending?",
+        {"employee": None, "team": None, "hr": {
+            "totalPendingActions": 9, "leavesPending": 3,
+            "documentsPending": 2, "loansPending": 2,
+            "authorizationsPending": 2, "newUsersPendingApproval": 1,
+        }},
+    )
+    assert data["source"] == "local_rules"
+    assert "9" in data["answer"]
+
+
+# ===========================================================================
+# HR-5. HR_MANAGER personal document-request gap (v1.11 fix)
+# ===========================================================================
+
+_HR_FORBIDDEN_EMPLOYEE_ROUTES = (
+    "/employee/documents",
+    "/employee/leave",
+    "/employee/loans",
+    "/employee/authorizations",
+    "/employee/notifications",
+    "/employee/profile",
+    "/employee/calendar",
+)
+
+
+def _assert_no_employee_routes_for_hr(data: dict, question: str) -> None:
+    """Assert no /employee/* routes appear in any HR_MANAGER response."""
+    routes = _routes(data)
+    for route in routes:
+        assert not route.startswith("/employee/"), (
+            f"/employee/* route '{route}' leaked into HR_MANAGER answer "
+            f"for '{question}': {routes}"
+        )
+
+
+def test_hr_request_document_gets_management_redirect():
+    """'How do I request a document?' for HR_MANAGER -> management-account redirect."""
+    data = post_chat("HR_MANAGER", "How do I request a document?")
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower, (
+        f"Expected management redirect: {data['answer']}"
+    )
+    _assert_no_employee_routes_for_hr(data, "How do I request a document?")
+
+
+def test_hr_request_certificate_gets_management_redirect():
+    """'How do I request a certificate?' for HR_MANAGER -> management-account redirect."""
+    data = post_chat("HR_MANAGER", "How do I request a certificate?")
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower, (
+        f"Expected management redirect: {data['answer']}"
+    )
+    _assert_no_employee_routes_for_hr(data, "How do I request a certificate?")
+
+
+def test_hr_request_salary_certificate_gets_management_redirect():
+    """'Can I request a salary certificate?' for HR_MANAGER -> management-account redirect."""
+    data = post_chat("HR_MANAGER", "Can I request a salary certificate?")
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower, (
+        f"Expected management redirect: {data['answer']}"
+    )
+    _assert_no_employee_routes_for_hr(data, "Can I request a salary certificate?")
+
+
+def test_hr_manage_documents_still_returns_hr_guidance():
+    """'Where can I manage documents?' must still return HR document-management, not the redirect."""
+    data = post_chat("HR_MANAGER", "Where can I manage documents?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/hr/requests" in routes, f"Expected /hr/requests: {routes}"
+    assert "/employee/documents" not in routes
+    # Must NOT be the generic personal-redirect answer
+    answer_lower = data["answer"].lower()
+    assert "all hr requests" in answer_lower or "hr requests" in answer_lower, (
+        f"Expected HR Requests mention, got: {data['answer']}"
+    )
+
+
+def test_employee_request_document_still_gets_employee_guidance():
+    """EMPLOYEE 'How do I request a document?' -> employee self-service (not the HR redirect)."""
+    data = post_chat("EMPLOYEE", "How do I request a document?")
+    # Must be handled by local rules (document handler or fallback — not refusal)
+    assert data["source"] != "refusal", f"Should not be refused: {data['answer']}"
+    # Must NOT say 'management account'
+    assert "management account" not in data["answer"].lower(), (
+        f"Management redirect leaked into EMPLOYEE answer: {data['answer']}"
+    )
+
+
+def test_team_leader_request_document_still_gets_personal_guidance():
+    """TEAM_LEADER 'How do I request a document?' -> personal self-service (not the HR redirect)."""
+    data = post_chat("TEAM_LEADER", "How do I request a document?")
+    assert data["source"] != "refusal"
+    assert "management account" not in data["answer"].lower(), (
+        f"Management redirect leaked into TEAM_LEADER answer: {data['answer']}"
+    )
+
+
+def test_hr_working_time_still_has_hr_routes_after_phrase_change():
+    """HR_MANAGER working-time answer still has HR routes after phrase-set change."""
+    data = post_chat("HR_MANAGER", "What is working time?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/hr/dashboard" in routes or "/hr/requests" in routes
+    _assert_no_employee_routes_for_hr(data, "What is working time?")
+
+
+@pytest.mark.parametrize("question", [
+    "How do I request a document?",
+    "How can I request a document?",
+    "How do I request a certificate?",
+    "How can I get a certificate?",
+    "How do I ask for a document?",
+    "Can I request a salary certificate?",
+    "Can I request a document?",
+    "Can I get a document?",
+])
+def test_hr_all_personal_doc_request_phrasings_get_redirect(question: str):
+    """All personal document-request phrasings for HR_MANAGER must return the management redirect."""
+    data = post_chat("HR_MANAGER", question)
+    assert data["source"] == "local_rules", (
+        f"Expected local_rules for HR '{question}', got {data['source']}"
+    )
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower, (
+        f"Expected management redirect for '{question}': {data['answer']}"
+    )
+    _assert_no_employee_routes_for_hr(data, question)

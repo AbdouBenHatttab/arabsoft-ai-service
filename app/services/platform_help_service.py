@@ -60,6 +60,20 @@ _PERSONAL_EMPLOYEE_PHRASES: frozenset[str] = frozenset([
     "submit a leave request",
     "how do i submit",
     "my leave request",
+    # personal document / certificate requests
+    "request a document",
+    "request a certificate",
+    "request a salary",
+    "get a certificate",
+    "get a document",
+    "ask for a document",
+    "ask for a certificate",
+    "how do i request a",      # broad: "how do i request a document/certificate/..."
+    "how can i request a",     # broad: "how can i request a document/certificate/..."
+    "can i request a document",
+    "can i request a certificate",
+    "can i get a document",
+    "can i get a certificate",
     # personal requests (MY requests, not general)
     "my personal requests",
     "show my requests",
@@ -83,7 +97,7 @@ def _is_personal_employee_question(q: str) -> bool:
 _TEAM_MANAGEMENT_PHRASES: frozenset[str] = frozenset([
     "team request",
     "team leave",
-    "Team Leave Calendar",
+    "team calendar",
     "team member",
     "my team",
     "team task",
@@ -278,7 +292,8 @@ def get_platform_help(request: ChatRequest) -> Optional[ChatResponse]:
     #  13. _handle_leave_request                 leave submission guidance.
     #      NOTE: _handle_working_time MUST be before _handle_leave_request so that
     #      "weekends count in leave" is caught by working-time, not leave-request.
-    #  14. _handle_hr_user_setup                 HR new-user workflow.
+    #  14. _handle_hr_user_setup                 HR user management (create, activate, roles).
+    #  14b._handle_hr_document_management         HR document request management.
     #  15. _handle_profile                       profile navigation.
     handlers = [
         _handle_hr_manager_personal_redirect,   # guard: MUST be first
@@ -297,6 +312,7 @@ def get_platform_help(request: ChatRequest) -> Optional[ChatResponse]:
         _handle_loan,
         _handle_leave_request,                  # MUST stay after _handle_working_time
         _handle_hr_user_setup,
+        _handle_hr_document_management,         # HR document request management
         _handle_profile,
     ]
 
@@ -955,22 +971,34 @@ def _handle_working_time(
     meeting time slots.
 
     Fires for all roles (factual platform information, no personal-flow risk).
+    Related pages are role-aware:
+      EMPLOYEE / TEAM_LEADER : My Leave Requests, My Loans.
+      HR_MANAGER             : HR Dashboard, All HR Requests.
     IMPORTANT: must appear BEFORE _handle_leave_request in the dispatcher.
     """
     if not any(phrase in q for phrase in _WORKING_TIME_PHRASES):
         return None
 
-    return ChatResponse(
-        answer=(
-            "Working days are Monday to Friday.\n"
-            "Weekends and Tunisian public holidays are excluded from leave deductions — only working days are counted.\n"
-            "Loan meeting slots: 08:00, 09:00, 10:00, 11:00, 13:00, 14:00, 15:00, 16:00 (12:00 excluded for lunch)."
-        ),
-        relatedPages=[
+    answer = (
+        "Working days are Monday to Friday.\n"
+        "Working hours are 08:00\u201311:00 and 13:00\u201316:00 (12:00 excluded for lunch).\n"
+        "Weekends and Tunisian public holidays are excluded from leave deductions \u2014 only working days are counted.\n"
+        "Loan meeting slots: 08:00, 09:00, 10:00, 11:00, 13:00, 14:00, 15:00, 16:00."
+    )
+
+    if role == "HR_MANAGER":
+        pages = [
+            RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
+            RelatedPage(label="All HR Requests", route="/hr/requests"),
+        ]
+    else:
+        # EMPLOYEE and TEAM_LEADER (personal self-service links only)
+        pages = [
             RelatedPage(label="My Leave Requests", route="/employee/leave"),
             RelatedPage(label="My Loans",          route="/employee/loans"),
-        ],
-    )
+        ]
+
+    return ChatResponse(answer=answer, relatedPages=pages)
 
 
 # ---------------------------------------------------------------------------
@@ -1267,26 +1295,106 @@ def _handle_leave_request(q: str, role: str, request: ChatRequest) -> Optional[C
 
 
 # ---------------------------------------------------------------------------
-# HR user-setup handler
+# HR user management handler  (expanded from _handle_hr_user_setup)
 # ---------------------------------------------------------------------------
 
 def _handle_hr_user_setup(q: str, role: str, request: ChatRequest) -> Optional[ChatResponse]:
     """
-    HR_MANAGER: create/configure new user accounts -> /hr/users
+    HR_MANAGER: all user-management questions -> /hr/users.
+
+    Covers account creation, activation/deactivation, role assignment, and
+    onboarding of NEW_USER accounts, plus general employee management navigation.
     """
     if role != "HR_MANAGER":
         return None
-    if not ("setup" in q or "new user" in q or "create user" in q or "add user" in q):
+
+    _user_mgmt_phrases = (
+        "manage user",
+        "manage employee",
+        "manage account",
+        "user management",
+        "employee management",
+        "setup user",
+        "set up user",
+        "new user",
+        "create user",
+        "add user",
+        "activate user",
+        "activate account",
+        "deactivate user",
+        "deactivate account",
+        "assign role",
+        "change role",
+        "approve user",
+        "approve new user",
+        "onboard user",
+        "onboard employee",
+        "user account",
+    )
+    if not any(phrase in q for phrase in _user_mgmt_phrases):
         return None
 
     return ChatResponse(
         answer=(
-            "You can create and configure new user accounts in the User Management section. "
-            "Fill in the employee details, assign the appropriate role, and the user will "
-            "receive an activation email to complete their account setup."
+            "Use User Management to review, activate, and configure employee accounts. "
+            "You can assign roles, approve NEW_USER accounts waiting for onboarding, "
+            "and deactivate accounts when needed. "
+            "The HR Dashboard gives you a summary of pending onboarding and active users."
         ),
         relatedPages=[
             RelatedPage(label="User Management", route="/hr/users"),
+            RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# HR document management handler  (NEW)
+# ---------------------------------------------------------------------------
+
+_HR_DOCUMENT_PHRASES: tuple[str, ...] = (
+    "manage document",
+    "manage documents",
+    "document request",
+    "document requests",
+    "handle document",
+    "upload document",
+    "upload certificate",
+    "prepare certificate",
+    "prepare document",
+    "hr upload",
+    "hr document",
+    "see document request",
+    "view document request",
+    "document management",
+    "certificate request",
+)
+
+
+def _handle_hr_document_management(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    HR_MANAGER: document request management -> /hr/requests.
+
+    Explains where HR handles document/certificate requests and how the employee
+    is notified when the document is ready. Never uses /employee/documents.
+    """
+    if role != "HR_MANAGER":
+        return None
+    if not any(phrase in q for phrase in _HR_DOCUMENT_PHRASES):
+        return None
+
+    return ChatResponse(
+        answer=(
+            "Document and certificate requests from employees are managed in All HR Requests. "
+            "You can review each request, prepare or upload the document, and mark it as ready. "
+            "The employee will receive an in-app notification (and possibly an email) "
+            "when the document is available for download."
+        ),
+        relatedPages=[
+            RelatedPage(label="All HR Requests", route="/hr/requests"),
+            RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
         ],
     )
 
