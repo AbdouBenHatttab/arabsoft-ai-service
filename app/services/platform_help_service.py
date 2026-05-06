@@ -1,7 +1,7 @@
 """
 platform_help_service.py
 ------------------------
-Role-aware, rule-based platform guidance for ArabSoft users (v1.3 / local mode).
+Role-aware, rule-based platform guidance for ArabSoft users (v1.4 / local mode).
 
 Each handler receives the lowercased question and the original ChatRequest,
 and returns a ChatResponse when it matches, or None to fall through.
@@ -83,7 +83,7 @@ def _is_personal_employee_question(q: str) -> bool:
 _TEAM_MANAGEMENT_PHRASES: frozenset[str] = frozenset([
     "team request",
     "team leave",
-    "team calendar",
+    "Team Leave Calendar",
     "team member",
     "my team",
     "team task",
@@ -260,24 +260,42 @@ def get_platform_help(request: ChatRequest) -> Optional[ChatResponse]:
     #   2. _handle_hr_dashboard_counts           MUST come second for HR_MANAGER —
     #      catches count/pending questions before generic handlers fire.
     #   3. _handle_team_leader_approvals         TEAM_LEADER approval count questions.
+    #   3b._handle_team_leader_team_availability  TEAM_LEADER team availability / absences.
+    #      MUST be before _handle_team_leader_team_leave so availability questions
+    #      return Team Leave Calendar first without being caught by the leave handler.
+    #   3c._handle_team_leader_team_leave         TEAM_LEADER team leave request questions.
+    #      MUST be before _handle_team_leader_team so specific team-leave questions
+    #      get the precise Team Requests vs Team Leave Calendar answer.
     #   4. _handle_team_leader_team              general team-management guidance.
     #   5. _handle_pending_requests              EMPLOYEE / TEAM_LEADER pending count.
     #   6. _handle_annual_leave_balance          annual leave balance (context-aware).
     #   7. _handle_sick_leave_balance            sick leave balance (context-aware).
-    #   8. _handle_loan                          loan navigation.
-    #   9. _handle_leave_request                 leave submission guidance.
-    #  10. _handle_hr_user_setup                 HR new-user workflow.
-    #  11. _handle_profile                       profile navigation.
+    #   8. _handle_document_notification         document-ready / notification / email Q.
+    #   9. _handle_working_time                  working hours / weekends / public holidays.
+    #  10. _handle_request_status               request status / tracking.
+    #  11. _handle_platform_overview            "what can I do" overview.
+    #  12. _handle_loan                          loan navigation.
+    #  13. _handle_leave_request                 leave submission guidance.
+    #      NOTE: _handle_working_time MUST be before _handle_leave_request so that
+    #      "weekends count in leave" is caught by working-time, not leave-request.
+    #  14. _handle_hr_user_setup                 HR new-user workflow.
+    #  15. _handle_profile                       profile navigation.
     handlers = [
         _handle_hr_manager_personal_redirect,   # guard: MUST be first
         _handle_hr_dashboard_counts,            # HR count questions
         _handle_team_leader_approvals,          # TL pending approvals count
+        _handle_team_leader_team_availability,  # TL team availability / absences (MUST precede team-leave handler)
+        _handle_team_leader_team_leave,         # TL team leave questions (MUST precede general team handler)
         _handle_team_leader_team,               # TL team-management (general)
         _handle_pending_requests,               # employee pending request count
         _handle_annual_leave_balance,           # annual leave balance
         _handle_sick_leave_balance,             # sick leave balance
+        _handle_document_notification,          # document readiness / notifications / email
+        _handle_working_time,                   # working hours / weekends / public holidays
+        _handle_request_status,                 # request status tracking
+        _handle_platform_overview,              # "what can I do" platform overview
         _handle_loan,
-        _handle_leave_request,
+        _handle_leave_request,                  # MUST stay after _handle_working_time
         _handle_hr_user_setup,
         _handle_profile,
     ]
@@ -481,6 +499,120 @@ def _handle_team_leader_approvals(
 
 
 # ---------------------------------------------------------------------------
+# TEAM_LEADER team leave request handler  (v1.6 — inserted before general team handler)
+# ---------------------------------------------------------------------------
+
+# Phrases that indicate a TEAM_LEADER question specifically about reviewing
+# or finding their team's leave requests / approvals (not personal leave).
+_TEAM_LEAVE_REQUEST_PHRASES: tuple[str, ...] = (
+    "team leave request",
+    "team's leave request",
+    "check team leave",
+    "review team leave",
+    "team leave approval",
+    "team leave approvals",
+    "where are team leave",
+    "where can i check team leave",
+    "where do i review team leave",
+    "how do i check my team",
+    "check my team's leave",
+    "team member leave",
+    "team members leave",
+)
+
+# Phrases that indicate a TEAM_LEADER question about team availability,
+# absences, or the Team Leave Calendar specifically — NOT about reviewing
+# pending leave requests.
+_TEAM_AVAILABILITY_PHRASES: tuple[str, ...] = (
+    "team availability",
+    "team's availability",
+    "team absences",
+    "team's absences",
+    "team absence",
+    "who is absent",
+    "who is off",
+    "overlapping absences",
+    "overlapping leaves",
+    "leave overlap",
+    "absences overlap",
+    "team leave calendar",
+    "see team leave",
+    "view team leave",
+    "team calendar",
+)
+
+
+def _handle_team_leader_team_availability(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Answer TEAM_LEADER questions about team availability, absences, and
+    the Team Leave Calendar.
+
+    This handler is more specific than _handle_team_leader_team_leave:
+    it fires when the user is asking *where to see* team availability or
+    absences, rather than asking about pending leave requests to act on.
+
+    Must appear BEFORE _handle_team_leader_team_leave in the dispatcher
+    so that availability questions are caught here first.
+
+    Related pages: Team Leave Calendar first (primary), Team Requests second.
+    My Leave Requests is NOT included — this is a team context, not personal.
+    """
+    if role != "TEAM_LEADER":
+        return None
+    if not any(phrase in q for phrase in _TEAM_AVAILABILITY_PHRASES):
+        return None
+
+    return ChatResponse(
+        answer=(
+            "Use Team Leave Calendar to see your team's approved and pending absences, "
+            "check availability, and spot overlapping leave before making a decision.\n"
+            "Use Team Requests to review and act on pending leave requests from your team members."
+        ),
+        relatedPages=[
+            RelatedPage(label="Team Leave Calendar", route="/team/calendar"),
+            RelatedPage(label="Team Requests",       route="/team/requests"),
+        ],
+    )
+
+
+def _handle_team_leader_team_leave(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Answer TEAM_LEADER questions specifically about reviewing team leave requests.
+
+    Distinguishes the two dedicated pages:
+      - Team Requests       : where pending leave requests are reviewed and acted on.
+      - Team Leave Calendar : where overlapping absences and team availability
+                              can be checked before making a decision.
+
+    My Leave Requests is intentionally not included as a chip here (team context
+    only). The text still mentions personal leave is separate.
+
+    Must appear BEFORE _handle_team_leader_team in the dispatcher.
+    """
+    if role != "TEAM_LEADER":
+        return None
+    if not any(phrase in q for phrase in _TEAM_LEAVE_REQUEST_PHRASES):
+        return None
+
+    return ChatResponse(
+        answer=(
+            "Use Team Requests to review and act on pending leave requests from your team members.\n"
+            "Use Team Leave Calendar to check team availability and spot overlapping absences "
+            "before making your decision.\n"
+            "Your own personal leave requests are in My Leave Requests, not here."
+        ),
+        relatedPages=[
+            RelatedPage(label="Team Requests",       route="/team/requests"),
+            RelatedPage(label="Team Leave Calendar", route="/team/calendar"),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # TEAM_LEADER team-management handler (general)
 # ---------------------------------------------------------------------------
 
@@ -590,8 +722,7 @@ def _handle_annual_leave_balance(
     Reads from context.employee.annualAvailableDays.
     HR_MANAGER questions are caught earlier by the redirect guard.
     """
-    # Match: "leave balance", "annual leave", "how much leave", "annual balance"
-    # but NOT questions specifically about sick leave only
+    # Exclude questions specifically about sick leave only
     is_sick_only = "sick" in q and "annual" not in q
     if is_sick_only:
         return None  # handled by _handle_sick_leave_balance
@@ -676,6 +807,401 @@ def _handle_sick_leave_balance(
 
 
 # ---------------------------------------------------------------------------
+# Document readiness / notification / email handler  (v1.5 polish)
+# ---------------------------------------------------------------------------
+
+# Notification/email intent: user wants to know IF/HOW they will be told
+_DOCUMENT_NOTIFY_PHRASES: tuple[str, ...] = (
+    "notified when",
+    "get notified",
+    "will i be notified",
+    "will i get notified",
+    "receive a notification",
+    "receive notification",
+    "get a notification",
+    "send me a notification",
+    "notify me",
+    "do i get an email",
+    "receive an email",
+    "get an email",
+    "send me an email",
+    "email me",
+    "email notification",
+    "document ready",
+    "document is ready",
+    "certificate ready",
+    "certificate is ready",
+    "document uploaded",
+    "hr uploads",
+    "hr upload",
+    "document prepared",
+    "how do i know",
+    "how will i know",
+)
+
+# Access/download intent: user wants to find or download their document
+_DOCUMENT_ACCESS_PHRASES: tuple[str, ...] = (
+    "document available",
+    "my document",
+    "my certificate",
+    "access my document",
+    "access my certificate",
+    "download my document",
+    "download my certificate",
+    "where is my document",
+    "where is my certificate",
+    "find my document",
+    "where can i find my document",
+    "where can i find my certificate",
+)
+
+
+def _handle_document_notification(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Two sub-cases:
+      A. Notification/email intent — how will the user be informed?
+      B. Access/download intent   — where can the user find the document?
+
+    HR_MANAGER is excluded — personal employee-flow question.
+    Never claims a specific document is ready.
+    """
+    if role == "HR_MANAGER":
+        return None
+
+    is_notify = any(phrase in q for phrase in _DOCUMENT_NOTIFY_PHRASES)
+    is_access = any(phrase in q for phrase in _DOCUMENT_ACCESS_PHRASES)
+
+    if not (is_notify or is_access):
+        return None
+
+    if is_notify:
+        # Case A: the user wants to know when/how HR will tell them
+        return ChatResponse(
+            answer=(
+                "When HR prepares your document, you'll receive an in-app notification. "
+                "An email may also be sent depending on your notification settings. "
+                "Check My Documents to download ready documents and Notifications for updates."
+            ),
+            relatedPages=[
+                RelatedPage(label="My Documents",  route="/employee/documents"),
+                RelatedPage(label="Notifications", route="/employee/notifications"),
+            ],
+        )
+    else:
+        # Case B: the user wants to find or download their document
+        return ChatResponse(
+            answer=(
+                "Your requested documents are in My Documents. "
+                "Ready documents can be downloaded directly from there. "
+                "You'll get an in-app notification (and possibly an email) when HR finishes preparation."
+            ),
+            relatedPages=[
+                RelatedPage(label="My Documents",  route="/employee/documents"),
+                RelatedPage(label="Notifications", route="/employee/notifications"),
+            ],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Working time / working days / weekends / public holidays handler  (NEW in v1.4)
+# ---------------------------------------------------------------------------
+
+# Phrases that indicate a question about working hours, working days, or how
+# weekends and public holidays affect leave and loan meeting scheduling.
+_WORKING_TIME_PHRASES: tuple[str, ...] = (
+    "working time",
+    "work time",
+    "working hours",
+    "work hours",
+    "business hours",
+    "working days",
+    "work days",
+    "workdays",
+    "weekends count",
+    "weekend count",
+    "do weekends",
+    "are weekends",
+    "weekends included",
+    "weekends excluded",
+    "saturday",
+    "sunday",
+    "public holiday",
+    "public holidays",
+    "national holiday",
+    "national holidays",
+    "tunisian holiday",
+    "bank holiday",
+    "holidays count",
+    "holidays excluded",
+    "leave deduction",
+    "deducted from leave",
+    "count toward leave",
+    "count as leave",
+    "loan meeting",
+    "meeting slot",
+    "meeting time",
+    "meeting hour",
+    "available slot",
+)
+
+
+def _handle_working_time(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Explain working hours, working days, leave deduction rules, and loan
+    meeting time slots.
+
+    Fires for all roles (factual platform information, no personal-flow risk).
+    IMPORTANT: must appear BEFORE _handle_leave_request in the dispatcher.
+    """
+    if not any(phrase in q for phrase in _WORKING_TIME_PHRASES):
+        return None
+
+    return ChatResponse(
+        answer=(
+            "Working days are Monday to Friday.\n"
+            "Weekends and Tunisian public holidays are excluded from leave deductions — only working days are counted.\n"
+            "Loan meeting slots: 08:00, 09:00, 10:00, 11:00, 13:00, 14:00, 15:00, 16:00 (12:00 excluded for lunch)."
+        ),
+        relatedPages=[
+            RelatedPage(label="My Leave Requests", route="/employee/leave"),
+            RelatedPage(label="My Loans",          route="/employee/loans"),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request status / tracking handler  (NEW in v1.4)
+# ---------------------------------------------------------------------------
+
+# Phrases that indicate a question about checking the current status of a
+# submitted request (leave, document, loan, authorization).
+_REQUEST_STATUS_PHRASES: tuple[str, ...] = (
+    "check my request",
+    "check request status",
+    "check the status",
+    "track my request",
+    "track my leave",          # catches "how do i track my leave?" before leave handler
+    "track request",
+    "request status",
+    "status of my request",
+    "where is my request",
+    "where can i check",
+    "where can i see",
+    "where can i track",
+    "where can i find my request",
+    "see my request",
+    "view my request",
+    "status of my leave",
+    "my leave status",
+    "my loan status",
+    "my document status",
+    "authorization status",
+    "request approved",
+    "request rejected",
+    "request pending",
+    "is my request",
+    "has my request",
+    "did my request",
+    "what happened to my request",
+    "follow up on my request",
+    "follow up my request",
+    "follow my leave",          # catches "how can i follow my leave request?"
+)
+
+
+def _handle_request_status(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Explain where users can check the status of each type of request and
+    what the common status values mean in user-friendly language.
+
+    Fires for EMPLOYEE and TEAM_LEADER.
+    HR_MANAGER: management-facing answer (they track employee requests,
+    not personal ones).
+
+    Rules:
+    - Do not expose raw enum names; use readable labels.
+    - Guide to the relevant page(s) depending on the question specificity.
+    - Do not claim a specific request is approved or rejected without context.
+    """
+    if not any(phrase in q for phrase in _REQUEST_STATUS_PHRASES):
+        return None
+
+    # HR_MANAGER gets a management-appropriate answer
+    if role == "HR_MANAGER":
+        return ChatResponse(
+            answer=(
+                "You can track and manage all employee requests from the HR Requests section. "
+                "Each request shows its current status: pending, waiting for a decision, "
+                "approved, rejected, or cancelled. You can filter by type and take action "
+                "directly from the list."
+            ),
+            relatedPages=[
+                RelatedPage(label="All HR Requests", route="/hr/requests"),
+                RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
+            ],
+        )
+
+    # Determine if the question is narrowed to a specific request type
+    is_leave  = "leave" in q
+    is_loan   = "loan" in q
+    is_doc    = "document" in q or "certificate" in q
+    is_auth   = "authorization" in q or "authoris" in q
+
+    # Build a focused answer if the question targets one type
+    specific = sum([is_leave, is_loan, is_doc, is_auth])
+
+    if specific == 1:
+        if is_leave:
+            answer = (
+                "Check My Leave Requests for the status of your leave. "
+                "Statuses: pending (waiting for Team Leader), waiting for HR, approved, rejected, or cancelled."
+            )
+            pages = [RelatedPage(label="My Leave Requests", route="/employee/leave")]
+        elif is_loan:
+            answer = (
+                "Check My Loans for the status of your loan request. "
+                "Statuses: pending, meeting scheduled, approved, or rejected."
+            )
+            pages = [RelatedPage(label="My Loans", route="/employee/loans")]
+        elif is_doc:
+            answer = (
+                "Check My Documents for the status of your document request. "
+                "Statuses: pending (HR is processing), ready to download, or rejected."
+            )
+            pages = [
+                RelatedPage(label="My Documents",  route="/employee/documents"),
+                RelatedPage(label="Notifications", route="/employee/notifications"),
+            ]
+        else:  # authorization
+            answer = (
+                "Check Authorizations for the status of your authorization request. "
+                "Statuses: pending, approved, or rejected."
+            )
+            pages = [RelatedPage(label="Authorizations", route="/employee/authorizations")]
+    else:
+        # General "where can I check my requests" answer
+        answer = (
+            "Track each request in its own section:\n"
+            "\u2022 Leave — My Leave Requests (pending, waiting for HR, approved, rejected, cancelled)\n"
+            "\u2022 Documents — My Documents (pending, ready, rejected)\n"
+            "\u2022 Loans — My Loans (pending, meeting scheduled, approved, rejected)\n"
+            "\u2022 Authorizations — Authorizations (pending, approved, rejected)"
+        )
+        pages = [
+            RelatedPage(label="My Leave Requests", route="/employee/leave"),
+            RelatedPage(label="My Documents",      route="/employee/documents"),
+            RelatedPage(label="My Loans",          route="/employee/loans"),
+            RelatedPage(label="Authorizations",    route="/employee/authorizations"),
+        ]
+
+    return ChatResponse(answer=answer, relatedPages=pages)
+
+
+# ---------------------------------------------------------------------------
+# Platform overview / "what can I do" handler  (NEW in v1.4)
+# ---------------------------------------------------------------------------
+
+# Phrases that trigger a role-aware overview of what the platform offers.
+_PLATFORM_OVERVIEW_PHRASES: tuple[str, ...] = (
+    "what can i do",
+    "what can i use",
+    "what features",
+    "what is this platform",
+    "what does this platform",
+    "what does this website",
+    "what can this platform",
+    "what can this website",
+    "what is this website",
+    "what is this app",
+    "what can i do here",
+    "what can i do on this",
+    "how do i use this",
+    "how do i use the platform",
+    "overview of the platform",
+    "platform overview",
+    "what is available",
+    "what are my options",
+)
+
+
+def _handle_platform_overview(
+    q: str, role: str, request: ChatRequest
+) -> Optional[ChatResponse]:
+    """
+    Return a concise, role-aware overview of platform features.
+
+    EMPLOYEE / TEAM_LEADER: personal self-service features.
+    HR_MANAGER: management / administrative features.
+
+    Kept short — the old generic paragraph was too long for a chat answer.
+    """
+    if not any(phrase in q for phrase in _PLATFORM_OVERVIEW_PHRASES):
+        return None
+
+    if role == "HR_MANAGER":
+        return ChatResponse(
+            answer=(
+                "As an HR Manager you have access to the following administrative sections:\n"
+                "• User Management — create, configure, and activate employee accounts\n"
+                "• Leave Approvals — review and process employee leave requests\n"
+                "• HR Requests — manage document, loan, and authorization requests\n"
+                "• HR Calendar — view team availability and approved leave schedules\n"
+                "• Statistics & Reports — platform usage and leave analytics\n"
+                "• Teams — manage team composition and assignments"
+            ),
+            relatedPages=[
+                RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
+                RelatedPage(label="User Management", route="/hr/users"),
+                RelatedPage(label="All HR Requests", route="/hr/requests"),
+                RelatedPage(label="HR Reports",      route="/hr/reports"),
+            ],
+        )
+
+    if role == "TEAM_LEADER":
+        return ChatResponse(
+            answer=(
+                "As a Team Leader you have two areas:\n"
+                "Personal: request and track leave, loans, documents, and authorizations; "
+                "view your profile and situation summary.\n"
+                "Team: review team leave requests, check team availability in the team calendar, "
+                "follow projects, tasks, and team notifications."
+            ),
+            relatedPages=[
+                RelatedPage(label="My Leave Requests",   route="/employee/leave"),
+                RelatedPage(label="Team Requests",       route="/team/requests"),
+                RelatedPage(label="Team Leave Calendar", route="/team/calendar"),
+                RelatedPage(label="Projects & Tasks",    route="/team/tasks"),
+                RelatedPage(label="Notifications",       route="/employee/notifications"),
+            ],
+        )
+
+    # EMPLOYEE (and defensively: NEW_USER)
+    return ChatResponse(
+        answer=(
+            "As an employee you can:\n"
+            "\u2022 Request and track leave (annual, sick, and other types)\n"
+            "\u2022 Request official documents and certificates\n"
+            "\u2022 Apply for a personal loan\n"
+            "\u2022 Submit authorizations (time-off, equipment)\n"
+            "\u2022 View tasks and notifications\n"
+            "\u2022 Update your profile and view your situation summary"
+        ),
+        relatedPages=[
+            RelatedPage(label="My Leave Requests", route="/employee/leave"),
+            RelatedPage(label="My Documents",      route="/employee/documents"),
+            RelatedPage(label="My Loans",          route="/employee/loans"),
+            RelatedPage(label="Notifications",     route="/employee/notifications"),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Loan handler
 # ---------------------------------------------------------------------------
 
@@ -720,6 +1246,9 @@ def _handle_leave_request(q: str, role: str, request: ChatRequest) -> Optional[C
     """
     Personal leave request submission for EMPLOYEE and TEAM_LEADER -> /employee/leave
     HR_MANAGER personal questions are caught earlier by the redirect guard.
+
+    NOTE: this handler must stay AFTER _handle_working_time so that questions
+    like "do weekends count in leave?" are caught by working-time first.
     """
     if "leave" not in q:
         return None
