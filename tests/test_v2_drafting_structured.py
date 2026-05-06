@@ -438,7 +438,9 @@ def test_improve_text_extract_draft_fields_returns_none():
 # ===========================================================================
 
 def test_gemini_structured_fields_used_when_present():
-    """When Gemini returns structuredFields, those values must populate draftFields."""
+    """When Gemini returns structuredFields, those values must populate draftFields.
+    The question must contain an explicit leave type keyword for leaveType to be kept
+    (safety guard: prevents Gemini from inferring ANNUAL from generic phrasing)."""
     structured = {
         "leaveType": "ANNUAL",
         "startDate": "May 12",
@@ -454,7 +456,8 @@ def test_gemini_structured_fields_used_when_present():
             answer="Here is your leave request draft.",
             structured_fields=structured,
         )
-        data = post_chat("EMPLOYEE", "Help me draft a leave request reason")
+        # Question must include "annual leave" keyword so the safety guard keeps ANNUAL
+        data = post_chat("EMPLOYEE", "Help me draft a leave request for annual leave from May 12 to May 14")
 
     assert data["source"] == "external_ai"
     assert data["draftType"] == "LEAVE_REQUEST"
@@ -616,6 +619,162 @@ def test_gemini_disabled_local_extractor_used_for_loan():
     assert data["draftType"] == "LOAN_REQUEST"
     assert data["draftFields"]["amount"] is not None
     assert "2500" in data["draftFields"]["amount"]
+
+
+# ===========================================================================
+# 34. Phase 3.2: Natural absence phrase routing fix
+#     "time off", "day off", "vacation", "away from work" must route to
+#     LEAVE_REQUEST, not fall through to generic platform help.
+# ===========================================================================
+
+def test_time_off_with_dates_and_reason_routes_to_leave_request():
+    """
+    Bug 1 scenario: "I need time off from May 27, 2026 to May 28, 2026
+    because family matter."
+    - Must return LEAVE_REQUEST with dates and reason extracted.
+    - leaveType must be None ("time off" is generic, not a leave type keyword).
+    - missingFields must include "leaveType".
+    - The assistant must NOT say "I understood this as an annual request".
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "I need time off from May 27, 2026 to May 28, 2026 because family matter.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST", (
+        f"Expected LEAVE_REQUEST, got {data['draftType']} (source={data['source']})"
+    )
+    assert data["draftFields"] is not None
+    assert data["draftFields"]["startDate"] == "2026-05-27"
+    assert data["draftFields"]["endDate"] == "2026-05-28"
+    assert data["draftFields"]["reason"] is not None
+    assert "family" in (data["draftFields"]["reason"] or "").lower()
+    # leaveType must be None — "time off" is generic, not annual/sick/unpaid/etc.
+    assert data["draftFields"]["leaveType"] is None, (
+        f"leaveType must be None for 'time off', got {data['draftFields']['leaveType']}"
+    )
+    assert "leaveType" in data["missingFields"], (
+        "'leaveType' must appear in missingFields when not explicitly stated"
+    )
+    assert "startDate" not in data["missingFields"]
+    assert "endDate" not in data["missingFields"]
+
+
+def test_want_time_off_routes_to_leave_request():
+    """'I want time off from May 27 to May 28.' -> LEAVE_REQUEST, leaveType None."""
+    data = post_chat(
+        "EMPLOYEE",
+        "I want time off from May 27 to May 28.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["startDate"] is not None
+    assert data["draftFields"]["endDate"] is not None
+    assert data["draftFields"]["startDate"].endswith("-05-27")
+    assert data["draftFields"]["endDate"].endswith("-05-28")
+    assert data["draftFields"]["leaveType"] is None, (
+        "'time off' must not infer leaveType"
+    )
+    assert "leaveType" in data["missingFields"]
+
+
+def test_vacation_routes_to_leave_request_with_annual_type():
+    """'I need vacation from May 27 to May 28.' -> LEAVE_REQUEST, leaveType=ANNUAL."""
+    data = post_chat(
+        "EMPLOYEE",
+        "I need vacation from May 27 to May 28.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] == "ANNUAL"
+    assert "leaveType" not in data["missingFields"]
+
+
+def test_day_off_tomorrow_routes_to_leave_request():
+    """'I need a day off tomorrow.' -> LEAVE_REQUEST, leaveType None (not ANNUAL)."""
+    data = post_chat(
+        "EMPLOYEE",
+        "I need a day off tomorrow.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["startDate"] is not None
+    assert data["draftFields"]["leaveType"] is None, (
+        "'day off' must not infer leaveType"
+    )
+    assert "leaveType" in data["missingFields"]
+
+
+def test_away_from_work_routes_to_leave_request():
+    """'I will be away from work from May 27 to May 28.' -> LEAVE_REQUEST, leaveType None."""
+    data = post_chat(
+        "EMPLOYEE",
+        "I will be away from work from May 27 to May 28.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["startDate"] is not None
+    assert data["draftFields"]["endDate"] is not None
+    assert data["draftFields"]["leaveType"] is None, (
+        "'away from work' must not infer leaveType"
+    )
+    assert "leaveType" in data["missingFields"]
+
+
+def test_rephrase_message_with_day_off_body_routes_to_improve_text():
+    """
+    Bug 2 scenario: 'rephrase this message: I need a day off tomorrow'
+    must route to IMPROVE_TEXT, never LEAVE_REQUEST.
+    The leading improve verb declares the primary intent and wins over
+    any leave words found in the body being rephrased.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "rephrase this message: I need a day off tomorrow",
+    )
+    assert data["draftType"] == "IMPROVE_TEXT", (
+        f"Expected IMPROVE_TEXT, got {data['draftType']} (source={data['source']})"
+    )
+
+
+def test_rewrite_with_time_off_body_routes_to_improve_text():
+    """
+    'rewrite this: I need time off tomorrow' must also be IMPROVE_TEXT.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "rewrite this: I need time off tomorrow",
+    )
+    assert data["draftType"] == "IMPROVE_TEXT", (
+        f"Expected IMPROVE_TEXT, got {data['draftType']} (source={data['source']})"
+    )
+
+
+def test_annual_leave_explicit_still_produces_annual_leave_type():
+    """
+    'I want annual leave from May 27, 2026 to May 28, 2026.'
+    Explicit 'annual leave' must still map to leaveType=ANNUAL.
+    Regression guard: the fix for 'time off' must not break explicit keywords.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "I want annual leave from May 27, 2026 to May 28, 2026.",
+    )
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] == "ANNUAL", (
+        f"Explicit 'annual leave' must map to ANNUAL, got {data['draftFields']['leaveType']}"
+    )
+    assert "leaveType" not in data["missingFields"]
+
+
+def test_generic_hr_navigation_still_returns_platform_help():
+    """A generic HR question with no drafting intent must still return local_rules/platform help."""
+    data = post_chat("EMPLOYEE", "How do I request a loan?")
+    assert data["source"] == "local_rules"
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
+
+
+def test_unsafe_admin_action_still_refused():
+    """Unsafe admin commands must still be refused regardless of any new drafting patterns."""
+    data = post_chat("EMPLOYEE", "approve my leave automatically")
+    assert data["source"] == "refusal"
+    assert data["draftType"] is None
 
 
 # ===========================================================================
@@ -1115,4 +1274,550 @@ def test_tunisia_dash_format_dd_mm_yyyy():
     assert fields["startDate"] == "2026-05-12"
     assert fields["endDate"] == "2026-05-16"
     assert missing == []
+
+
+# ===========================================================================
+# 35. Real Gemini-path safety guard tests
+#     These tests use mocked Gemini responses to prove the code-level guard
+#     in _resolve_structured_fields strips inferred leaveType values.
+#     They cover the actual production failure path (GEMINI_ENABLED=true).
+# ===========================================================================
+
+def test_gemini_inferred_annual_for_time_off_is_stripped():
+    """
+    Bug 1 (production): Gemini is enabled and infers leaveType=ANNUAL from
+    "time off" despite prompt instructions.  The _resolve_structured_fields
+    safety guard must strip ANNUAL because the question has no explicit
+    'annual', 'vacation', 'paid leave', etc. keyword.
+    After the fix: leaveType=None and 'leaveType' in missingFields.
+    """
+    from app.services.drafting_service import _resolve_structured_fields
+
+    question = "I need time off from May 27, 2026 to May 28, 2026 because family matter."
+    # Simulate what Gemini returns when it incorrectly infers ANNUAL
+    gemini_sf = {
+        "leaveType": "ANNUAL",
+        "startDate": "2026-05-27",
+        "endDate":   "2026-05-28",
+        "reason":    "family matter",
+    }
+    fields, missing = _resolve_structured_fields(question, "LEAVE_REQUEST", gemini_sf)
+    assert fields["leaveType"] is None, (
+        f"Safety guard must strip Gemini-inferred ANNUAL for 'time off', got {fields['leaveType']}"
+    )
+    assert "leaveType" in missing, "'leaveType' must be in missingFields after stripping"
+    # dates and reason must pass through unchanged
+    assert fields["startDate"] == "2026-05-27"
+    assert fields["endDate"]   == "2026-05-28"
+    assert fields["reason"]    == "family matter"
+
+
+def test_gemini_inferred_annual_for_day_off_is_stripped():
+    """
+    'I need a day off tomorrow.' — Gemini infers ANNUAL.
+    Safety guard must strip it; leaveType=None.
+    """
+    from app.services.drafting_service import _resolve_structured_fields
+    from datetime import date, timedelta
+
+    tomorrow = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    question = "I need a day off tomorrow."
+    gemini_sf = {"leaveType": "ANNUAL", "startDate": tomorrow, "endDate": tomorrow, "reason": None}
+    fields, missing = _resolve_structured_fields(question, "LEAVE_REQUEST", gemini_sf)
+    assert fields["leaveType"] is None, "'day off' must not produce ANNUAL"
+    assert "leaveType" in missing
+
+
+def test_gemini_inferred_annual_for_away_from_work_is_stripped():
+    """
+    'I will be away from work from May 27, 2026 to May 28, 2026.' — Gemini infers ANNUAL.
+    Safety guard must strip it.
+    """
+    from app.services.drafting_service import _resolve_structured_fields
+
+    question = "I will be away from work from May 27, 2026 to May 28, 2026."
+    gemini_sf = {
+        "leaveType": "ANNUAL",
+        "startDate": "2026-05-27",
+        "endDate":   "2026-05-28",
+        "reason":    None,
+    }
+    fields, missing = _resolve_structured_fields(question, "LEAVE_REQUEST", gemini_sf)
+    assert fields["leaveType"] is None, "'away from work' must not produce ANNUAL"
+    assert "leaveType" in missing
+
+
+def test_gemini_explicit_annual_leave_keyword_is_kept():
+    """
+    'I want annual leave from May 27, 2026 to May 28, 2026.' — user explicitly
+    says 'annual leave', so Gemini's ANNUAL must be kept (safety guard must NOT strip).
+    Regression guard: fix must not break explicit leave type keywords.
+    """
+    from app.services.drafting_service import _resolve_structured_fields
+
+    question = "I want annual leave from May 27, 2026 to May 28, 2026."
+    gemini_sf = {
+        "leaveType": "ANNUAL",
+        "startDate": "2026-05-27",
+        "endDate":   "2026-05-28",
+        "reason":    None,
+    }
+    fields, missing = _resolve_structured_fields(question, "LEAVE_REQUEST", gemini_sf)
+    assert fields["leaveType"] == "ANNUAL", (
+        "Explicit 'annual leave' must keep leaveType=ANNUAL after safety guard"
+    )
+    assert "leaveType" not in missing
+
+
+def test_gemini_explicit_sick_leave_keyword_is_kept():
+    """
+    'I need sick leave from May 27 to May 28 because I am unwell.' —
+    user explicitly says 'sick leave'; Gemini's SICK must be kept.
+    """
+    from app.services.drafting_service import _resolve_structured_fields
+
+    question = "I need sick leave from May 27, 2026 to May 28, 2026 because I am unwell."
+    gemini_sf = {
+        "leaveType": "SICK",
+        "startDate": "2026-05-27",
+        "endDate":   "2026-05-28",
+        "reason":    "unwell",
+    }
+    fields, missing = _resolve_structured_fields(question, "LEAVE_REQUEST", gemini_sf)
+    assert fields["leaveType"] == "SICK"
+    assert "leaveType" not in missing
+
+
+def test_gemini_rephrase_improve_text_via_mock():
+    """
+    Bug 2 (production): 'rephrase this message: I need a day off tomorrow'
+    must return draftType=IMPROVE_TEXT even when Gemini is enabled.
+    Verify via the full Gemini-enabled path with a mocked Gemini response.
+    The mock simulates Gemini correctly following draft_type=IMPROVE_TEXT.
+    """
+    import json
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "text": json.dumps({
+                        "answer": "Here is a polished version of your message.",
+                        "draft": "Dear Manager, I would like to request a day off tomorrow for personal reasons. Please review and approve.",
+                        "disclaimer": "Please review before submitting.",
+                        "structuredFields": None,
+                    })
+                }]
+            }
+        }]
+    }
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        ms.gemini_enabled = True
+        ms.gemini_api_key = "test-key"
+        ms.gemini_model = "gemini-2.5-flash"
+        ms.gemini_timeout_seconds = 10
+        mh.return_value.__enter__.return_value.post.return_value = mock_resp
+
+        resp = client.post("/assistant/chat", json={
+            "role": "EMPLOYEE",
+            "question": "rephrase this message: I need a day off tomorrow",
+            "context": {},
+        })
+
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT", (
+        f"Expected IMPROVE_TEXT, got {data['draftType']} (source={data['source']})"
+    )
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+
+
+def test_gemini_rephrase_with_bad_leave_draft_still_returns_improve_text():
+    """
+    Worst case Bug 2: Gemini ignores draft_type=IMPROVE_TEXT and writes a
+    leave-request draft with structuredFields. The _resolve_structured_fields
+    guard must discard the structured fields (draftFields=None) and
+    draftType must still be IMPROVE_TEXT because _classify_draft_type
+    is deterministic (not overridable by Gemini).
+    """
+    import json
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+
+    # Simulate Gemini returning a leave-shaped response despite IMPROVE_TEXT
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "text": json.dumps({
+                        "answer": "Here is your annual leave request.",
+                        "draft": "Subject: Leave Request\n\nDear Manager, I request annual leave for tomorrow.",
+                        "disclaimer": "Please review.",
+                        "structuredFields": {
+                            "leaveType": "ANNUAL",
+                            "startDate": "2026-05-07",
+                            "endDate":   "2026-05-07",
+                            "reason":    "personal",
+                        },
+                    })
+                }]
+            }
+        }]
+    }
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        ms.gemini_enabled = True
+        ms.gemini_api_key = "test-key"
+        ms.gemini_model = "gemini-2.5-flash"
+        ms.gemini_timeout_seconds = 10
+        mh.return_value.__enter__.return_value.post.return_value = mock_resp
+
+        resp = client.post("/assistant/chat", json={
+            "role": "EMPLOYEE",
+            "question": "rephrase this message: I need a day off tomorrow",
+            "context": {},
+        })
+
+    data = resp.json()
+    # draftType must be IMPROVE_TEXT regardless of what Gemini wrote
+    assert data["draftType"] == "IMPROVE_TEXT"
+    # draftFields must be None for IMPROVE_TEXT regardless of Gemini's structured output
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+
+
+def test_time_off_full_api_path_leaveType_none():
+    """
+    End-to-end API test for Bug 1 via local path (Gemini disabled by conftest).
+    'I need time off...' must produce leaveType=None in draftFields.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "I need time off from May 27, 2026 to May 28, 2026 because family matter.",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] is None, (
+        f"leaveType must be None for 'time off', got: {data['draftFields']['leaveType']}"
+    )
+    assert data["draftFields"]["startDate"] == "2026-05-27"
+    assert data["draftFields"]["endDate"]   == "2026-05-28"
+    assert data["draftFields"]["reason"] is not None
+    assert "family" in data["draftFields"]["reason"].lower()
+    assert "leaveType" in data["missingFields"]
+
+
+def test_day_off_tomorrow_leaveType_none():
+    """
+    'I need a day off tomorrow.' — leaveType must be None.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "I need a day off tomorrow.",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] is None, (
+        "'day off' must not produce a leaveType"
+    )
+    assert "leaveType" in data["missingFields"]
+
+
+def test_away_from_work_leaveType_none():
+    """
+    'I will be away from work from May 27, 2026 to May 28, 2026.'
+    leaveType must be None.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "I will be away from work from May 27, 2026 to May 28, 2026.",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] is None, (
+        "'away from work' must not produce a leaveType"
+    )
+    assert "leaveType" in data["missingFields"]
+
+
+def test_annual_leave_explicit_regression():
+    """
+    Regression: 'I want annual leave from May 27, 2026 to May 28, 2026.'
+    must still produce leaveType=ANNUAL. The safety guard must NOT strip
+    explicit leave type keywords.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "I want annual leave from May 27, 2026 to May 28, 2026.",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "LEAVE_REQUEST"
+    assert data["draftFields"]["leaveType"] == "ANNUAL", (
+        f"Explicit 'annual leave' must produce ANNUAL, got: {data['draftFields']['leaveType']}"
+    )
+    assert "leaveType" not in data["missingFields"]
+
+
+def test_rephrase_full_api_path_improve_text():
+    """
+    End-to-end API test for Bug 2 via local path (Gemini disabled by conftest).
+    'rephrase this message: I need a day off tomorrow' must be IMPROVE_TEXT.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "rephrase this message: I need a day off tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT", (
+        f"Expected IMPROVE_TEXT, got {data['draftType']}"
+    )
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+
+
+def test_rewrite_full_api_path_improve_text():
+    """
+    'rewrite this: I need time off tomorrow' must also be IMPROVE_TEXT.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "rewrite this: I need time off tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT"
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+
+
+# ===========================================================================
+# 36. IMPROVE_TEXT content quality — no template language, no placeholders
+# ===========================================================================
+
+_TEMPLATE_BAD_PHRASES = [
+    "replace the bracketed",
+    "fill in the bracketed",
+    "bracketed placeholders",
+    "personalise this draft",
+    "before submitting",
+    "cannot submit",
+    "template draft",
+    "--- suggested professional version ---",
+    "[your main point",
+    "[briefly provide",
+    "[your name]",
+]
+
+
+def _assert_no_template_language(draft: str, question: str):
+    """Assert that an IMPROVE_TEXT draft contains no template/workflow language."""
+    d = (draft or "").lower()
+    for bad in _TEMPLATE_BAD_PHRASES:
+        assert bad not in d, (
+            f"Template language {bad!r} found in IMPROVE_TEXT draft for {question!r}:\n{draft!r}"
+        )
+    assert "[" not in (draft or ""), (
+        f"Placeholder brackets found in IMPROVE_TEXT draft for {question!r}:\n{draft!r}"
+    )
+
+
+def test_rephrase_draft_is_polished_rewrite_not_template():
+    """
+    'rephrase this message: I need a day off tomorrow'
+    draft must be a polished sentence, not a template scaffold.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "rephrase this message: I need a day off tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT"
+    _assert_no_template_language(data["draft"], "rephrase this message: I need a day off tomorrow")
+    # Must contain the substance of the rewrite
+    draft_lower = (data["draft"] or "").lower()
+    assert "day off" in draft_lower or "request" in draft_lower, (
+        f"Expected polished rewrite mentioning 'day off' or 'request', got: {data['draft']!r}"
+    )
+    assert data["answer"] == "Here is a polished rewrite of your text."
+
+
+def test_rewrite_draft_is_polished_rewrite_not_template():
+    """
+    'rewrite this: I need time off tomorrow'
+    draft must be a polished sentence, not a template scaffold.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "rewrite this: I need time off tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT"
+    _assert_no_template_language(data["draft"], "rewrite this: I need time off tomorrow")
+    draft_lower = (data["draft"] or "").lower()
+    assert "time off" in draft_lower or "request" in draft_lower, (
+        f"Expected polished rewrite mentioning 'time off' or 'request', got: {data['draft']!r}"
+    )
+
+
+def test_improve_sentence_draft_is_polished_rewrite_not_template():
+    """
+    'improve this sentence: I need a day off tomorrow'
+    draft must be a polished sentence, not a template scaffold.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "improve this sentence: I need a day off tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT"
+    _assert_no_template_language(data["draft"], "improve this sentence: I need a day off tomorrow")
+    draft_lower = (data["draft"] or "").lower()
+    assert "day off" in draft_lower or "request" in draft_lower
+
+
+def test_local_polish_text_function_directly():
+    """Unit test for _polish_text — core rewrite logic."""
+    from app.services.drafting_service import _polish_text
+
+    cases = [
+        ("I need a day off tomorrow",   "I would like to request a day off tomorrow."),
+        ("I need time off tomorrow",    "I would like to request time off tomorrow."),
+        ("I want a day off next week",  "I would like to a day off next week."),
+    ]
+    for raw, expected in cases:
+        result = _polish_text(raw)
+        assert result == expected, f"_polish_text({raw!r}) = {result!r}, expected {expected!r}"
+
+
+def test_local_improve_prefix_re_strips_correctly():
+    """Unit test: _IMPROVE_PREFIX_RE strips instruction prefix leaving the body."""
+    from app.services.drafting_service import _IMPROVE_PREFIX_RE
+
+    cases = [
+        ("rephrase this message: I need a day off tomorrow", "I need a day off tomorrow"),
+        ("rewrite this: I need time off tomorrow",           "I need time off tomorrow"),
+        ("improve this sentence: I need a day off tomorrow", "I need a day off tomorrow"),
+        ("rephrase: I need a day off",                       "I need a day off"),
+        ("polish this text: hello world",                   "hello world"),
+    ]
+    for q, expected_body in cases:
+        body = _IMPROVE_PREFIX_RE.sub('', q.strip()).strip()
+        assert body == expected_body, (
+            f"Prefix strip of {q!r} = {body!r}, expected {expected_body!r}"
+        )
+
+
+def test_gemini_improve_text_bad_response_falls_back_to_local_polish():
+    """
+    When Gemini returns a leave-template draft for an IMPROVE_TEXT request,
+    the fallback _local_draft must produce a clean polished rewrite.
+    This test simulates Gemini failing (timeout) so _local_draft is used.
+    """
+    import httpx
+    from unittest.mock import patch, MagicMock
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        ms.gemini_enabled = True
+        ms.gemini_api_key = "test-key"
+        ms.gemini_model = "gemini-2.5-flash"
+        ms.gemini_timeout_seconds = 10
+        mh.return_value.__enter__.return_value.post.side_effect = httpx.TimeoutException("timeout")
+
+        resp = client.post("/assistant/chat", json={
+            "role": "EMPLOYEE",
+            "question": "rephrase this message: I need a day off tomorrow",
+            "context": {},
+        })
+
+    data = resp.json()
+    assert data["draftType"] == "IMPROVE_TEXT"
+    _assert_no_template_language(data["draft"], "rephrase this message: I need a day off tomorrow")
+    assert data["source"] == "local_rules"
+
+
+def test_leave_request_draft_still_has_template_language():
+    """
+    Regression: LEAVE_REQUEST drafts must still include template placeholders
+    and the review disclaimer. The fix must not remove them from non-IMPROVE_TEXT types.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+
+    resp = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "draft a leave request for tomorrow",
+        "context": {},
+    })
+    data = resp.json()
+    assert data["draftType"] == "LEAVE_REQUEST"
+    draft_lower = (data["draft"] or "").lower()
+    # Leave template must still contain its structural elements
+    assert "[" in (data["draft"] or ""), "Leave template must still contain placeholders"
+    assert "review" in draft_lower or "personalise" in draft_lower, (
+        "Leave template must still contain review disclaimer"
+    )
 
