@@ -361,9 +361,19 @@ def test_local_authorization_draft_contains_authorization_content():
 
 
 def test_local_document_draft_contains_document_content():
+    """
+    DOCUMENT_REQUEST returns draft=None (structured submission, not a letter).
+    Verify the response carries draftFields with documentType instead.
+    """
     data = post_chat("EMPLOYEE", "Help me compose a document request letter")
-    draft = (data["draft"] or "").lower()
-    assert "document" in draft or "certificate" in draft or "[document name]" in draft
+    assert data["draftType"] == "DOCUMENT_REQUEST"
+    # draft must be None — DOCUMENT_REQUEST does not produce a letter
+    assert data.get("draft") is None, (
+        f"DOCUMENT_REQUEST must return draft=None, got: {data.get('draft')!r}"
+    )
+    # structured content lives in draftFields instead
+    assert data["draftFields"] is not None
+    assert "documentType" in data["draftFields"]
 
 
 # ---------------------------------------------------------------------------

@@ -162,6 +162,16 @@ _DRAFT_SUBJECTS: list[str] = [
     "an employment certificate",
     "a payslip",
     "an experience letter",
+    "an experience certificate",
+    "a leave balance statement",
+    "a contract copy",
+    "a work reference",
+    "a reference letter",
+    "administrative letter",
+    "admin letter",
+    "a custom administrative letter",
+    "a custom admin letter",
+    "administrative certificate",
     "time off",
     "day off",
     "days off",
@@ -193,10 +203,19 @@ _STRONG_DOCUMENT_SIGNALS: list[str] = [
     "payslip",
     "pay slip",
     "experience letter",
+    "experience certificate",
     "attestation",
     "work cert",
     "salary cert",
     "employment cert",
+    "leave balance statement",
+    "leave balance",
+    "contract copy",
+    "work reference",
+    "reference letter",
+    "administrative letter",
+    "admin letter",
+    "administrative certificate",
 ]
 
 # Improve-text leading verbs — checked FIRST in _classify_draft_type.
@@ -217,6 +236,27 @@ _IMPROVE_LEADING_VERBS: list[str] = [
     "make this professional",
 ]
 
+# Letter-writing signals — when the message contains one of these phrases the
+# user is asking for text generation (writing a letter), not submitting a
+# platform request.  Checked BEFORE the document-signal branch so that
+# "write me a formal letter requesting a salary certificate" stays IMPROVE_TEXT.
+# The check is intentionally narrow: only explicit "write/draft/compose a letter"
+# patterns, not generic "write" or "draft" which also appear in platform intents
+# like "help me draft a leave request".
+_LETTER_WRITING_SIGNALS: list[str] = [
+    "write me a letter",
+    "write a letter",
+    "write me a formal letter",
+    "write a formal letter",
+    "draft a letter",
+    "draft me a letter",
+    "compose a letter",
+    "compose me a letter",
+    "help me write a letter",
+    "write an official letter",
+    "draft an official letter",
+]
+
 
 def _classify_draft_type(question: str) -> str:
     """
@@ -224,6 +264,7 @@ def _classify_draft_type(question: str) -> str:
 
     Priority order:
       0. IMPROVE_TEXT (leading verb) — checked FIRST.
+      0b. IMPROVE_TEXT (letter-writing signal) — "write me a formal letter", etc.
       1. DOCUMENT_REQUEST
       2. AUTHORIZATION_REQUEST
       3. LOAN_REQUEST
@@ -235,6 +276,13 @@ def _classify_draft_type(question: str) -> str:
     # 0. Leading improvement verb wins over everything
     q_start = q[:40]
     if any(q_start.startswith(v) for v in _IMPROVE_LEADING_VERBS):
+        return _TYPE_IMPROVE
+
+    # 0b. Explicit letter-writing intent wins over document-request classification.
+    # "write me a formal letter requesting a salary certificate" → IMPROVE_TEXT.
+    # This is checked before document signals because the user is asking for
+    # text generation, not a platform submission.
+    if any(sig in q for sig in _LETTER_WRITING_SIGNALS):
         return _TYPE_IMPROVE
 
     if any(sig in q for sig in _STRONG_DOCUMENT_SIGNALS):
@@ -272,12 +320,14 @@ _SUPPORTED_LEAVE_TYPES: dict[str, list[str]] = {
 }
 
 _DOCUMENT_TYPES: list[tuple[str, list[str]]] = [
-    ("salary certificate", ["salary certificate", "salary cert"]),
-    ("employment certificate", ["employment certificate", "work certificate", "employment cert"]),
-    ("payslip", ["payslip", "pay slip", "pay stub"]),
-    ("experience letter", ["experience letter", "experience cert"]),
-    ("work certificate", ["work cert"]),
-    ("attestation", ["attestation"]),
+    ("SALARY_CERTIFICATE",           ["salary certificate", "salary cert"]),
+    ("EMPLOYMENT_CERTIFICATE",        ["employment certificate", "work certificate", "employment cert"]),
+    ("EXPERIENCE_CERTIFICATE",        ["experience letter", "experience cert", "experience certificate"]),
+    ("WORK_REFERENCE_LETTER",         ["work reference", "reference letter", "work cert"]),
+    ("CUSTOM_ADMINISTRATIVE_LETTER",  ["administrative letter", "admin letter", "custom letter", "administrative certificate", "attestation"]),
+    ("LEAVE_BALANCE_STATEMENT",       ["leave balance statement", "leave balance", "balance statement"]),
+    ("CONTRACT_COPY",                 ["contract copy", "my contract", "employment contract"]),
+    ("payslip",                       ["payslip", "pay slip", "pay stub"]),
 ]
 
 _AUTH_TYPES: list[tuple[str, list[str]]] = [
@@ -721,13 +771,15 @@ def extract_draft_fields(
 
     if draft_type == _TYPE_DOC:
         doc_type = _extract_document_type(question)
-        purpose = _extract_purpose(question)
-        fields = {"documentType": doc_type, "purpose": purpose, "extraDetails": None}
+        notes = _extract_purpose(question)
+        # DOCUMENT_REQUEST is a structured platform submission, not a letter.
+        # Spring Boot CreateDocumentRequestDto only requires documentType;
+        # notes is optional. extraDetails is not a DTO field — omit it.
+        # missingFields only flags documentType when it could not be extracted.
+        fields = {"documentType": doc_type, "notes": notes}
         missing = []
         if doc_type is None:
             missing.append("documentType")
-        if purpose is None:
-            missing.append("purpose")
         return fields, missing
 
     return None, []
@@ -816,6 +868,55 @@ _IMPROVE_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Letter-generation prefix — strips the "write me a (formal) letter" instruction
+# so the remaining text names the document type / purpose.
+# e.g. "write me a formal letter requesting a salary certificate"
+#   -> "requesting a salary certificate"
+_LETTER_PREFIX_RE = re.compile(
+    r'^(?:write\s+(?:me\s+)?(?:a|an)\s+(?:formal\s+|official\s+)?letter\s*(?:requesting|asking for|for)?'
+    r'|draft\s+(?:me\s+)?(?:a|an)\s+(?:formal\s+|official\s+)?letter\s*(?:requesting|asking for|for)?'
+    r'|compose\s+(?:me\s+)?(?:a|an)\s+(?:formal\s+|official\s+)?letter\s*(?:requesting|asking for|for)?'
+    r'|help\s+me\s+write\s+(?:a|an)\s+(?:formal\s+|official\s+)?letter\s*(?:requesting|asking for|for)?)',
+    re.IGNORECASE,
+)
+
+# HR document labels that map to human-readable names for the letter template.
+_DOC_LABEL_MAP: dict[str, str] = {
+    "SALARY_CERTIFICATE":          "a salary certificate",
+    "EMPLOYMENT_CERTIFICATE":       "an employment certificate",
+    "EXPERIENCE_CERTIFICATE":       "an experience certificate",
+    "WORK_REFERENCE_LETTER":        "a work reference letter",
+    "CUSTOM_ADMINISTRATIVE_LETTER": "an administrative letter",
+    "LEAVE_BALANCE_STATEMENT":      "a leave balance statement",
+    "CONTRACT_COPY":                "a copy of my employment contract",
+}
+
+_LETTER_TEMPLATE = (
+    "Dear HR Team,\n\n"
+    "I am writing to formally request {document_label}.\n\n"
+    "I kindly ask you to process this request at your earliest convenience. "
+    "Please let me know if any additional information is required.\n\n"
+    "Thank you for your assistance.\n\n"
+    "Regards,\n[Your Name]"
+)
+
+
+def _is_letter_writing_intent(question: str) -> bool:
+    """Return True when the user explicitly asks to write/draft/compose a letter."""
+    return any(sig in question.lower() for sig in _LETTER_WRITING_SIGNALS)
+
+
+def _generate_letter_draft(question: str) -> str:
+    """
+    Produce a concise formal letter body for an explicit letter-writing request.
+    Extracts the document type from the question when possible; falls back to
+    a generic placeholder.
+    """
+    # Try to identify what document is being requested so the letter is specific.
+    doc_type = _extract_document_type(question)
+    document_label = _DOC_LABEL_MAP.get(doc_type, "[document name]") if doc_type else "[document name]"
+    return _LETTER_TEMPLATE.format(document_label=document_label)
+
 
 def _polish_text(raw: str) -> str:
     """
@@ -853,8 +954,22 @@ def _polish_text(raw: str) -> str:
 def _local_draft(question: str, draft_type: str) -> ChatResponse:
     """Build a ChatResponse — polished rewrite for IMPROVE_TEXT, template for all others."""
     if draft_type == _TYPE_IMPROVE:
-        # Strip the instruction prefix to isolate the text to be polished,
-        # then rewrite it naturally. No placeholders. No workflow language.
+        # Explicit letter-writing intent: generate a real formal letter body
+        # instead of trying to polish/echo the user's instruction as prose.
+        # e.g. "write me a formal letter requesting a salary certificate"
+        if _is_letter_writing_intent(question):
+            letter_body = _generate_letter_draft(question)
+            return ChatResponse(
+                answer="Here is a formal letter you can review and edit.",
+                draft=letter_body,
+                warnings=[],
+                source="local_rules",
+                draftType=_TYPE_IMPROVE,
+                draftFields=None,
+                missingFields=[],
+            )
+
+        # Generic improve/rephrase: strip the instruction prefix and polish the body.
         body = _IMPROVE_PREFIX_RE.sub('', question.strip()).strip()
         polished = _polish_text(body) if body else question.strip()
         return ChatResponse(
@@ -865,6 +980,20 @@ def _local_draft(question: str, draft_type: str) -> ChatResponse:
             draftType=_TYPE_IMPROVE,
             draftFields=None,
             missingFields=[],
+        )
+
+    if draft_type == _TYPE_DOC:
+        # DOCUMENT_REQUEST is a structured platform submission, not a letter.
+        # Return no draft text — React renders DocumentDraftPreview from draftFields.
+        draft_fields, missing_fields = extract_draft_fields(question, draft_type)
+        return ChatResponse(
+            answer="I prepared a document request preview. Please review the details and confirm to submit.",
+            draft=None,
+            warnings=[],
+            source="local_rules",
+            draftType=_TYPE_DOC,
+            draftFields=draft_fields,
+            missingFields=missing_fields,
         )
 
     template = _LOCAL_TEMPLATES.get(draft_type, _LOCAL_TEMPLATES[_TYPE_LEAVE])
@@ -929,6 +1058,11 @@ structuredFields schema by draftType:
   LOAN_REQUEST:     { "amount": null, "reason": null }
   AUTHORIZATION_REQUEST: { "authorizationType": null, "date": null, "fromTime": null, "toTime": null, "reason": null }
   DOCUMENT_REQUEST: { "documentType": null, "purpose": null, "extraDetails": null }
+  For DOCUMENT_REQUEST, documentType MUST be one of these exact enum values (uppercase, underscored):
+    SALARY_CERTIFICATE | EMPLOYMENT_CERTIFICATE | EXPERIENCE_CERTIFICATE |
+    WORK_REFERENCE_LETTER | CUSTOM_ADMINISTRATIVE_LETTER |
+    LEAVE_BALANCE_STATEMENT | CONTRACT_COPY
+  If the user's document type does not map to one of these, set documentType to null.
   IMPROVE_TEXT:     structuredFields must be null.
 
 Dates for LEAVE_REQUEST: normalize to ISO yyyy-MM-dd.
@@ -947,6 +1081,19 @@ JSON format:
 
 def _build_drafting_user_message(question: str, draft_type: str) -> str:
     if draft_type == _TYPE_IMPROVE:
+        if _is_letter_writing_intent(question):
+            doc_type = _extract_document_type(question)
+            document_label = _DOC_LABEL_MAP.get(doc_type, "[document name]") if doc_type else "[document name]"
+            return (
+                f"Draft type: {draft_type}\n"
+                f"User request: {question}\n\n"
+                f"The user wants a formal letter requesting {document_label}. "
+                "Write a concise, professional formal letter body addressed to 'Dear HR Team'. "
+                "Include: the request for the document, a polite ask to process promptly, "
+                "a note that they can provide more info if needed, and a closing. "
+                "Do NOT use placeholders except for [Your Name] at the end. "
+                "structuredFields must be null."
+            )
         return (
             f"Draft type: {draft_type}\n"
             f"User request: {question}\n\n"
@@ -955,6 +1102,16 @@ def _build_drafting_user_message(question: str, draft_type: str) -> str:
             "Do NOT add placeholders like [Your Name] or workflow language like 'please submit'. "
             "Produce only a polished rewrite of what the user wrote. "
             "structuredFields must be null."
+        )
+    if draft_type == _TYPE_DOC:
+        return (
+            f"Draft type: {draft_type}\n"
+            f"User request: {question}\n\n"
+            "IMPORTANT: DOCUMENT_REQUEST is a structured platform submission, NOT a letter. "
+            "Do NOT write a formal letter. Do NOT include 'Dear HR Team', '[Your Name]', or any letter body. "
+            "Set draft to null or an empty string. "
+            "Your ONLY task is to extract structuredFields: documentType (exact enum) and notes (purpose if stated). "
+            "For structuredFields, extract only what the user explicitly stated; use null for the rest."
         )
     return (
         f"Draft type: {draft_type}\n"
@@ -1022,11 +1179,15 @@ def _call_gemini_for_draft(
             logger.warning("Gemini drafting response contained no 'draft' field.")
             return None
 
-        # Append the review disclaimer for non-IMPROVE_TEXT drafts only.
-        # IMPROVE_TEXT is a polished rewrite — no workflow language.
-        if draft_type != _TYPE_IMPROVE:
+        # For DOCUMENT_REQUEST: discard the letter draft Gemini may have generated;
+        # React renders DocumentDraftPreview from draftFields only.
+        if draft_type == _TYPE_DOC:
+            draft_text = None
+        elif draft_type != _TYPE_IMPROVE:
+            # Append the review disclaimer for non-IMPROVE_TEXT, non-DOC drafts only.
             if "review" not in draft_text.lower() and "disclaimer" not in draft_text.lower():
                 draft_text += _REVIEW_DISCLAIMER
+        # (IMPROVE_TEXT is a polished rewrite — no workflow language appended.)
 
         gemini_structured = parsed.get("structuredFields")
 
@@ -1134,7 +1295,9 @@ def _expected_keys_for_type(draft_type: str) -> list[str]:
         _TYPE_LEAVE: ["leaveType", "startDate", "endDate", "reason"],
         _TYPE_LOAN: ["amount", "reason"],
         _TYPE_AUTH: ["authorizationType", "date", "fromTime", "toTime", "reason"],
-        _TYPE_DOC: ["documentType", "purpose", "extraDetails"],
+        # DOCUMENT_REQUEST: only documentType is required by Spring Boot DTO;
+        # notes is optional and maps to CreateDocumentRequestDto.notes.
+        _TYPE_DOC: ["documentType", "notes"],
     }
     return _EXPECTED.get(draft_type, [])
 

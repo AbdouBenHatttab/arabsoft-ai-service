@@ -372,7 +372,7 @@ def test_authorization_missing_times_in_missing_fields():
 
 
 # ===========================================================================
-# 9. Document request: documentType and purpose
+# 9. Document request: documentType and notes
 # ===========================================================================
 
 def test_document_request_extracts_salary_certificate():
@@ -381,9 +381,10 @@ def test_document_request_extracts_salary_certificate():
         "DOCUMENT_REQUEST",
     )
     assert fields["documentType"] is not None
-    assert "salary" in fields["documentType"].lower()
-    assert fields["purpose"] is not None
-    assert "bank" in fields["purpose"].lower() or "loan" in fields["purpose"].lower()
+    assert "salary" in fields["documentType"].lower() or fields["documentType"] == "SALARY_CERTIFICATE"
+    # notes captures the bank/loan context (mapped from purpose)
+    assert fields["notes"] is not None
+    assert "bank" in fields["notes"].lower() or "loan" in fields["notes"].lower()
 
 
 def test_document_request_extracts_employment_certificate():
@@ -410,7 +411,8 @@ def test_document_request_via_api():
     )
     assert data["draftType"] == "DOCUMENT_REQUEST"
     assert data["draftFields"] is not None
-    assert "salary" in (data["draftFields"]["documentType"] or "").lower()
+    assert "salary" in (data["draftFields"]["documentType"] or "").lower() or \
+           data["draftFields"]["documentType"] == "SALARY_CERTIFICATE"
 
 
 # ===========================================================================
@@ -890,7 +892,8 @@ def test_document_request_draftfields_has_all_keys():
     data = post_chat("EMPLOYEE", "Help me compose a document request letter")
     fields = data["draftFields"]
     assert fields is not None
-    for key in ["documentType", "purpose", "extraDetails"]:
+    # DOCUMENT_REQUEST draftFields must have documentType and notes
+    for key in ["documentType", "notes"]:
         assert key in fields, f"Missing key: {key}"
 
 
@@ -955,8 +958,11 @@ def test_document_draftfields_has_three_keys_always():
         "Help me compose a document request letter",
         "DOCUMENT_REQUEST",
     )
-    for key in ["documentType", "purpose", "extraDetails"]:
+    # DOCUMENT_REQUEST draftFields: documentType + notes only (matches Spring Boot DTO)
+    for key in ["documentType", "notes"]:
         assert key in fields
+    assert "extraDetails" not in fields
+    assert "purpose" not in fields
 
 
 # ===========================================================================
