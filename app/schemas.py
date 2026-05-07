@@ -23,6 +23,10 @@ class EmployeeContext(BaseModel):
     totalPendingRequests: Optional[int] = 0
     leavesPending: Optional[int] = 0
     documentsPending: Optional[int] = 0
+    # Approved document requests for which HR has not yet uploaded the file.
+    # Exposed separately from documentsPending so the assistant can explain each
+    # state precisely.  Counted in totalPendingRequests.
+    documentsAwaitingFile: Optional[int] = 0
     loansPending: Optional[int] = 0
     authorizationsPending: Optional[int] = 0
 
@@ -51,6 +55,10 @@ class HrContext(BaseModel):
     totalPendingActions: Optional[int] = 0
     leavesPending: Optional[int] = 0
     documentsPending: Optional[int] = 0
+    # Approved document requests for which HR has not yet uploaded the file.
+    # Exposed separately from documentsPending so the assistant can explain each
+    # state precisely.  Counted in totalPendingActions.
+    documentsAwaitingFile: Optional[int] = 0
     loansPending: Optional[int] = 0
     authorizationsPending: Optional[int] = 0
     newUsersPendingApproval: Optional[int] = 0

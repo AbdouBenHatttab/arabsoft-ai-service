@@ -681,6 +681,12 @@ def _handle_pending_requests(
 
     total = _get_total_pending(request)
     leaves = _get_leaves_pending(request)
+    emp = (request.context.employee if request.context else None)
+    documents_pending = emp.documentsPending if emp and emp.documentsPending is not None else 0
+    docs_awaiting = emp.documentsAwaitingFile if emp and emp.documentsAwaitingFile is not None else 0
+    loans_pending = emp.loansPending if emp and emp.loansPending is not None else 0
+    auths_pending = emp.authorizationsPending if emp and emp.authorizationsPending is not None else 0
+    leaves_pending = leaves if leaves is not None else 0
 
     if total is not None:
         if total == 0:
@@ -689,22 +695,33 @@ def _handle_pending_requests(
             )
         else:
             parts = []
-            if leaves and leaves > 0:
-                parts.append(f"{leaves} leave request{'s' if leaves != 1 else ''}")
-            emp = (request.context.employee if request.context else None)
-            if emp:
-                if emp.documentsPending:
-                    parts.append(f"{emp.documentsPending} document request{'s' if emp.documentsPending != 1 else ''}")
-                if emp.loansPending:
-                    parts.append(f"{emp.loansPending} loan request{'s' if emp.loansPending != 1 else ''}")
-                if emp.authorizationsPending:
-                    parts.append(f"{emp.authorizationsPending} authorization request{'s' if emp.authorizationsPending != 1 else ''}")
+            if leaves_pending > 0:
+                parts.append(f"{leaves_pending} leave request{'s' if leaves_pending != 1 else ''}")
+            if documents_pending > 0:
+                parts.append(
+                    f"{documents_pending} document request{'s' if documents_pending != 1 else ''} pending review"
+                )
+            if docs_awaiting > 0:
+                parts.append(
+                    f"{docs_awaiting} document{'s' if docs_awaiting != 1 else ''} waiting for HR to upload the file"
+                )
+            if loans_pending > 0:
+                parts.append(f"{loans_pending} loan request{'s' if loans_pending != 1 else ''}")
+            if auths_pending > 0:
+                parts.append(f"{auths_pending} authorization request{'s' if auths_pending != 1 else ''}")
 
-            if parts:
+            breakdown_sum = leaves_pending + documents_pending + docs_awaiting + loans_pending + auths_pending
+            if parts and breakdown_sum == total:
                 breakdown = ", ".join(parts)
                 answer = (
                     f"You currently have {total} open pending request{'s' if total != 1 else ''}: "
                     f"{breakdown}. You can view them in the relevant sections below."
+                )
+            elif parts and breakdown_sum < total:
+                breakdown = ", ".join(parts)
+                answer = (
+                    f"You currently have {total} total pending request{'s' if total != 1 else ''}. "
+                    f"Visible breakdown: {breakdown}. You can view them in the relevant sections below."
                 )
             else:
                 answer = (
@@ -717,13 +734,24 @@ def _handle_pending_requests(
             "You can check all your open requests directly on the platform."
         )
 
-    return ChatResponse(
-        answer=answer,
-        relatedPages=[
-            RelatedPage(label="My Leave Requests",    route="/employee/leave"),
-            RelatedPage(label="My Loans",             route="/employee/loans"),
-        ],
-    )
+    related_pages = []
+    if leaves_pending > 0:
+        related_pages.append(RelatedPage(label="My Leave Requests", route="/employee/leave"))
+    if documents_pending > 0 or docs_awaiting > 0:
+        related_pages.append(RelatedPage(label="My Documents", route="/employee/documents"))
+    if loans_pending > 0:
+        related_pages.append(RelatedPage(label="My Loans", route="/employee/loans"))
+    if auths_pending > 0:
+        related_pages.append(RelatedPage(label="Authorizations", route="/employee/authorizations"))
+    if not related_pages and total is not None and total > 0:
+        related_pages = [
+            RelatedPage(label="My Leave Requests", route="/employee/leave"),
+            RelatedPage(label="My Documents", route="/employee/documents"),
+            RelatedPage(label="My Loans", route="/employee/loans"),
+            RelatedPage(label="Authorizations", route="/employee/authorizations"),
+        ]
+
+    return ChatResponse(answer=answer, relatedPages=related_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -754,10 +782,17 @@ def _handle_annual_leave_balance(
     annual_days = _get_annual_days(request)
 
     if annual_days is not None:
-        answer = (
-            f"Your current annual leave balance is {annual_days} day{'s' if annual_days != 1 else ''}. "
-            "You can view the full breakdown and submit new requests in the Leave section."
-        )
+        if annual_days == 0:
+            answer = (
+                "Your current annual leave balance is 0 days. "
+                "New annual leave requests may not be available until your balance is updated or accrued. "
+                "You can view the full breakdown in the Leave section."
+            )
+        else:
+            answer = (
+                f"Your current annual leave balance is {annual_days} day{'s' if annual_days != 1 else ''}. "
+                "You can view the full breakdown and submit new requests in the Leave section."
+            )
     else:
         # Legacy flat context fallback (old test fixtures send {"leave": {"balance": N}})
         leave_ctx = (request.context.leave or {}) if request.context else {}

@@ -24,6 +24,8 @@ Coverage:
   13. Zero pending values answered correctly (not omitted).
   14. EMPLOYEE must not receive HR context answers.
   15. Breakdown fields (documentsPending, loansPending) appear in EMPLOYEE pending answer.
+  16. documentsAwaitingFile exposed separately in pending breakdown (not merged into documentsPending).
+  17. HR context parses documentsAwaitingFile without crashing.
 """
 
 import pytest
@@ -45,7 +47,7 @@ def post_chat(role: str, question: str, context: dict | None = None) -> dict:
 
 
 def _employee_context(
-    annual=15, sick=8, total=3, leaves=1, docs=1, loans=1, auths=0
+    annual=15, sick=8, total=3, leaves=1, docs=1, docs_awaiting=0, loans=1, auths=0
 ) -> dict:
     return {
         "employee": {
@@ -54,6 +56,7 @@ def _employee_context(
             "totalPendingRequests": total,
             "leavesPending": leaves,
             "documentsPending": docs,
+            "documentsAwaitingFile": docs_awaiting,
             "loansPending": loans,
             "authorizationsPending": auths,
         },
@@ -63,7 +66,7 @@ def _employee_context(
 
 
 def _team_leader_context(
-    annual=8, sick=3, total=2, leaves=1, docs=0, loans=1, auths=0,
+    annual=8, sick=3, total=2, leaves=1, docs=0, docs_awaiting=0, loans=1, auths=0,
     team_name="Backend Squad", member_count=5, pending_approvals=2
 ) -> dict:
     return {
@@ -73,6 +76,7 @@ def _team_leader_context(
             "totalPendingRequests": total,
             "leavesPending": leaves,
             "documentsPending": docs,
+            "documentsAwaitingFile": docs_awaiting,
             "loansPending": loans,
             "authorizationsPending": auths,
         },
@@ -86,7 +90,7 @@ def _team_leader_context(
 
 
 def _hr_context(
-    total=21, leaves=5, docs=3, loans=6, auths=7, new_users=4
+    total=21, leaves=5, docs=3, docs_awaiting=0, loans=6, auths=7, new_users=4
 ) -> dict:
     return {
         "employee": None,
@@ -95,6 +99,7 @@ def _hr_context(
             "totalPendingActions": total,
             "leavesPending": leaves,
             "documentsPending": docs,
+            "documentsAwaitingFile": docs_awaiting,
             "loansPending": loans,
             "authorizationsPending": auths,
             "newUsersPendingApproval": new_users,
@@ -273,16 +278,11 @@ def test_team_leader_pending_approvals_singular():
 # ===========================================================================
 # 4-B. TeamContext.pendingTeamLeaderApprovals: absent-key, zero, and positive
 # ===========================================================================
-# These four tests verify the fix for the unsafe default=0 bug.
-# Before the fix, an absent JSON key became 0 and the handler said
-# "you are all caught up" even when the count was unknown.
 
 def test_team_leader_absent_approvals_key_stays_none_not_zero():
     """
     When pendingTeamLeaderApprovals is absent from the JSON payload entirely
     the field must deserialise to None, not 0.
-    Sending a team object without the key simulates Spring Boot omitting it
-    when the count query failed during context assembly.
     """
     ctx = {
         "employee": {
@@ -304,25 +304,18 @@ def test_team_leader_absent_approvals_key_stays_none_not_zero():
     )
     assert data["source"] == "local_rules"
     answer_lower = data["answer"].lower()
-    # Must NOT say "caught up" or "no leave requests" (that would be the 0 branch)
     assert "caught up" not in answer_lower, (
         f"Absent key incorrectly treated as zero: {data['answer']}"
     )
-    # Must NOT state an invented number
     import re
     assert not re.search(r"there (?:are|is) \d+", answer_lower), (
         f"Invented count for absent key: {data['answer']}"
     )
-    # Must guide the user to the team requests page
     routes = [p["route"] for p in data["relatedPages"]]
     assert "/team/requests" in routes, f"Expected /team/requests, got {routes}"
 
 
 def test_team_leader_explicit_zero_approvals_gives_caught_up_answer():
-    """
-    When pendingTeamLeaderApprovals is explicitly 0 the handler must say
-    the queue is clear — this is a confirmed value, not a missing one.
-    """
     ctx = {
         "employee": {
             "annualAvailableDays": 8, "sickAvailableDays": 3,
@@ -332,15 +325,11 @@ def test_team_leader_explicit_zero_approvals_gives_caught_up_answer():
         "team": {
             "teamName": "Beta Squad",
             "memberCount": 3,
-            "pendingTeamLeaderApprovals": 0,  # explicit zero
+            "pendingTeamLeaderApprovals": 0,
         },
         "hr": None,
     }
-    data = post_chat(
-        "TEAM_LEADER",
-        "How many team approvals are pending?",
-        ctx,
-    )
+    data = post_chat("TEAM_LEADER", "How many team approvals are pending?", ctx)
     assert data["source"] == "local_rules"
     answer_lower = data["answer"].lower()
     assert "caught up" in answer_lower or "no leave" in answer_lower or "no " in answer_lower, (
@@ -349,10 +338,6 @@ def test_team_leader_explicit_zero_approvals_gives_caught_up_answer():
 
 
 def test_team_leader_positive_approvals_gives_exact_count():
-    """
-    When pendingTeamLeaderApprovals is a positive integer the handler must
-    state that exact number in the answer.
-    """
     ctx = {
         "employee": {
             "annualAvailableDays": 8, "sickAvailableDays": 3,
@@ -362,15 +347,11 @@ def test_team_leader_positive_approvals_gives_exact_count():
         "team": {
             "teamName": "Gamma Squad",
             "memberCount": 6,
-            "pendingTeamLeaderApprovals": 5,  # explicit positive
+            "pendingTeamLeaderApprovals": 5,
         },
         "hr": None,
     }
-    data = post_chat(
-        "TEAM_LEADER",
-        "How many team approvals are waiting?",
-        ctx,
-    )
+    data = post_chat("TEAM_LEADER", "How many team approvals are waiting?", ctx)
     assert data["source"] == "local_rules"
     assert "5" in data["answer"], f"Expected exact count '5', got: {data['answer']}"
     routes = [p["route"] for p in data["relatedPages"]]
@@ -378,33 +359,22 @@ def test_team_leader_positive_approvals_gives_exact_count():
 
 
 def test_team_leader_null_team_context_does_not_crash_or_invent():
-    """
-    When the team sub-object itself is null the handler must return a safe
-    answer (cannot-see guidance) without crashing or stating any invented count.
-    """
     ctx = {
         "employee": {
             "annualAvailableDays": 8, "sickAvailableDays": 3,
             "totalPendingRequests": 2, "leavesPending": 1,
             "documentsPending": 0, "loansPending": 1, "authorizationsPending": 0,
         },
-        "team": None,  # no team assigned yet
+        "team": None,
         "hr": None,
     }
-    data = post_chat(
-        "TEAM_LEADER",
-        "How many team approvals are pending?",
-        ctx,
-    )
+    data = post_chat("TEAM_LEADER", "How many team approvals are pending?", ctx)
     assert data["source"] == "local_rules"
-    # Must not crash
     assert data["answer"]
-    # Must not invent a count
     import re
     assert not re.search(r"there (?:are|is) \d+", data["answer"].lower()), (
         f"Invented count when team is null: {data['answer']}"
     )
-    # Must not say caught up (that would require a confirmed 0)
     assert "caught up" not in data["answer"].lower(), (
         f"'caught up' stated when team context is null: {data['answer']}"
     )
@@ -417,12 +387,7 @@ def test_team_leader_null_team_context_does_not_crash_or_invent():
 # ===========================================================================
 
 def test_hr_manager_pending_actions_uses_context():
-    """Answer must contain the exact totalPendingActions value."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many HR actions are pending?",
-        _hr_context(total=21),
-    )
+    data = post_chat("HR_MANAGER", "How many HR actions are pending?", _hr_context(total=21))
     assert data["source"] == "local_rules"
     assert "21" in data["answer"], f"Expected '21' in answer, got: {data['answer']}"
     routes = [p["route"] for p in data["relatedPages"]]
@@ -430,12 +395,7 @@ def test_hr_manager_pending_actions_uses_context():
 
 
 def test_hr_manager_total_pending_zero():
-    """Zero pending actions must be explicitly stated."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many pending actions are there?",
-        _hr_context(total=0),
-    )
+    data = post_chat("HR_MANAGER", "How many pending actions are there?", _hr_context(total=0))
     assert data["source"] == "local_rules"
     answer_lower = data["answer"].lower()
     assert "no" in answer_lower or "0" in answer_lower or "up to date" in answer_lower, (
@@ -444,12 +404,7 @@ def test_hr_manager_total_pending_zero():
 
 
 def test_hr_manager_platform_pending_question():
-    """'How many platform actions are pending?' should also work."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many platform actions are pending?",
-        _hr_context(total=7),
-    )
+    data = post_chat("HR_MANAGER", "How many platform actions are pending?", _hr_context(total=7))
     assert "7" in data["answer"], f"Expected '7' in answer, got: {data['answer']}"
 
 
@@ -458,12 +413,7 @@ def test_hr_manager_platform_pending_question():
 # ===========================================================================
 
 def test_hr_manager_new_users_pending_uses_context():
-    """Answer must contain the exact newUsersPendingApproval value."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many new users are waiting for approval?",
-        _hr_context(new_users=4),
-    )
+    data = post_chat("HR_MANAGER", "How many new users are waiting for approval?", _hr_context(new_users=4))
     assert data["source"] == "local_rules"
     assert "4" in data["answer"], f"Expected '4' in answer, got: {data['answer']}"
     routes = [p["route"] for p in data["relatedPages"]]
@@ -471,12 +421,7 @@ def test_hr_manager_new_users_pending_uses_context():
 
 
 def test_hr_manager_new_users_zero():
-    """Zero new users must be stated explicitly."""
-    data = post_chat(
-        "HR_MANAGER",
-        "Are there new users waiting for onboarding?",
-        _hr_context(new_users=0),
-    )
+    data = post_chat("HR_MANAGER", "Are there new users waiting for onboarding?", _hr_context(new_users=0))
     assert data["source"] == "local_rules"
     answer_lower = data["answer"].lower()
     assert "no" in answer_lower or "0" in answer_lower or "clear" in answer_lower, (
@@ -485,12 +430,7 @@ def test_hr_manager_new_users_zero():
 
 
 def test_hr_manager_new_users_singular():
-    """1 new user uses singular form."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many users are pending approval?",
-        _hr_context(new_users=1),
-    )
+    data = post_chat("HR_MANAGER", "How many users are pending approval?", _hr_context(new_users=1))
     assert "1" in data["answer"], f"Expected '1' in answer, got: {data['answer']}"
 
 
@@ -499,29 +439,17 @@ def test_hr_manager_new_users_singular():
 # ===========================================================================
 
 def test_hr_manager_leave_balance_redirected_not_context_value():
-    """HR_MANAGER asking about leave balance must get the redirect, not a context value."""
-    data = post_chat(
-        "HR_MANAGER",
-        "What is my leave balance?",
-        _hr_context(total=5),  # context has HR data — must not be used for personal answer
-    )
+    data = post_chat("HR_MANAGER", "What is my leave balance?", _hr_context(total=5))
     assert data["source"] == "local_rules"
     answer_lower = data["answer"].lower()
-    # Must be the management redirect
     assert "management account" in answer_lower or "hr manager" in answer_lower, (
         f"Expected management redirect, got: {data['answer']}"
     )
-    # Must not contain any invented personal balance number
     assert "your current annual leave balance" not in answer_lower
 
 
 def test_hr_manager_annual_leave_question_redirected():
-    """'What is my annual leave balance?' for HR_MANAGER must be redirected."""
-    data = post_chat(
-        "HR_MANAGER",
-        "What is my annual leave balance?",
-        {},
-    )
+    data = post_chat("HR_MANAGER", "What is my annual leave balance?", {})
     answer_lower = data["answer"].lower()
     assert "management account" in answer_lower or "hr manager" in answer_lower
 
@@ -531,20 +459,17 @@ def test_hr_manager_annual_leave_question_redirected():
 # ===========================================================================
 
 def test_employee_missing_context_does_not_crash():
-    """Empty context must not crash the service."""
     data = post_chat("EMPLOYEE", "How many pending requests do I have?", {})
     assert "source" in data
     assert data["answer"]
 
 
 def test_team_leader_missing_team_context_does_not_crash():
-    """Team context null must not crash the service."""
     ctx = {
         "employee": {"annualAvailableDays": 8, "sickAvailableDays": 3,
                      "totalPendingRequests": 2, "leavesPending": 1,
                      "documentsPending": 0, "loansPending": 1, "authorizationsPending": 0},
-        "team": None,
-        "hr": None,
+        "team": None, "hr": None,
     }
     data = post_chat("TEAM_LEADER", "How many team approvals are waiting?", ctx)
     assert "source" in data
@@ -552,14 +477,13 @@ def test_team_leader_missing_team_context_does_not_crash():
 
 
 def test_hr_manager_missing_hr_context_does_not_crash():
-    """HR context null must not crash the service."""
-    data = post_chat("HR_MANAGER", "How many HR actions are pending?", {"employee": None, "team": None, "hr": None})
+    data = post_chat("HR_MANAGER", "How many HR actions are pending?",
+                     {"employee": None, "team": None, "hr": None})
     assert "source" in data
     assert data["answer"]
 
 
 def test_null_context_entirely_does_not_crash():
-    """Null context object must not crash the service."""
     response = client.post("/assistant/chat", json={
         "role": "EMPLOYEE",
         "question": "What is my leave balance?",
@@ -574,72 +498,50 @@ def test_null_context_entirely_does_not_crash():
 # ===========================================================================
 
 def test_employee_missing_annual_days_no_invented_number():
-    """When annualAvailableDays is null, answer must not contain an invented count."""
     ctx = {
         "employee": {
-            "annualAvailableDays": None,
-            "sickAvailableDays": None,
-            "totalPendingRequests": 0,
-            "leavesPending": 0,
-            "documentsPending": 0,
-            "loansPending": 0,
-            "authorizationsPending": 0,
+            "annualAvailableDays": None, "sickAvailableDays": None,
+            "totalPendingRequests": 0, "leavesPending": 0,
+            "documentsPending": 0, "loansPending": 0, "authorizationsPending": 0,
         },
-        "team": None,
-        "hr": None,
+        "team": None, "hr": None,
     }
     data = post_chat("EMPLOYEE", "What is my annual leave balance?", ctx)
     answer = data["answer"]
-    # Must not contain any bare digit that looks like an invented balance
     import re
-    # The answer should guide to the page, not state a number
     assert "your current annual leave balance is" not in answer.lower() or (
-        # If it does appear, it must not have a digit after it (i.e. not "is 99 days")
         not re.search(r"your current annual leave balance is \d+", answer.lower())
     )
 
 
 def test_hr_manager_missing_new_users_no_invented_number():
-    """When newUsersPendingApproval is null, answer must not state an invented count."""
     ctx = {
-        "employee": None,
-        "team": None,
+        "employee": None, "team": None,
         "hr": {
-            "totalPendingActions": None,
-            "leavesPending": None,
-            "documentsPending": None,
-            "loansPending": None,
-            "authorizationsPending": None,
-            "newUsersPendingApproval": None,
+            "totalPendingActions": None, "leavesPending": None,
+            "documentsPending": None, "loansPending": None,
+            "authorizationsPending": None, "newUsersPendingApproval": None,
         },
     }
     data = post_chat("HR_MANAGER", "How many new users are waiting for approval?", ctx)
-    answer = data["answer"]
-    # Must not state a specific invented number
     import re
-    assert not re.search(r"there (?:are|is) \d+ new user", answer.lower()), (
-        f"Invented new-user count in answer: {answer}"
+    assert not re.search(r"there (?:are|is) \d+ new user", data["answer"].lower()), (
+        f"Invented new-user count in answer: {data['answer']}"
     )
 
 
 def test_team_leader_missing_approval_count_no_invented_number():
-    """When pendingTeamLeaderApprovals is null, answer must not state an invented count."""
     ctx = {
         "employee": {"annualAvailableDays": 8, "sickAvailableDays": 3,
                      "totalPendingRequests": 2, "leavesPending": 1,
                      "documentsPending": 0, "loansPending": 1, "authorizationsPending": 0},
-        "team": {
-            "teamName": "My Team",
-            "memberCount": 5,
-            "pendingTeamLeaderApprovals": None,
-        },
+        "team": {"teamName": "My Team", "memberCount": 5, "pendingTeamLeaderApprovals": None},
         "hr": None,
     }
     data = post_chat("TEAM_LEADER", "How many team approvals are pending?", ctx)
-    answer = data["answer"]
     import re
-    assert not re.search(r"there (?:are|is) \d+ (?:leave|request)", answer.lower()), (
-        f"Invented approval count in answer: {answer}"
+    assert not re.search(r"there (?:are|is) \d+ (?:leave|request)", data["answer"].lower()), (
+        f"Invented approval count in answer: {data['answer']}"
     )
 
 
@@ -648,7 +550,6 @@ def test_team_leader_missing_approval_count_no_invented_number():
 # ===========================================================================
 
 def test_regression_leave_draft_not_broken():
-    """Drafting questions must still work after context schema change."""
     data = post_chat("EMPLOYEE", "Help me draft a leave request reason", {})
     assert data.get("draft") is not None
     assert data["source"] in ("local_rules", "external_ai")
@@ -660,7 +561,6 @@ def test_regression_loan_draft_not_broken():
 
 
 def test_regression_detect_drafting_intent_unaffected():
-    """detect_drafting_intent must still return False for non-drafting questions."""
     from app.services.drafting_service import detect_drafting_intent
     assert detect_drafting_intent("What is my leave balance?") is False
     assert detect_drafting_intent("How do I request a loan?") is False
@@ -692,14 +592,8 @@ def test_regression_hr_manager_redirect_still_fires():
 # ===========================================================================
 
 def test_old_flat_context_leave_balance_still_deserialises():
-    """Old test fixtures that send {"leave": {"balance": N}} must not crash."""
-    data = post_chat(
-        "EMPLOYEE",
-        "What is my leave balance?",
-        {"leave": {"balance": 15}},
-    )
+    data = post_chat("EMPLOYEE", "What is my leave balance?", {"leave": {"balance": 15}})
     assert data["source"] == "local_rules"
-    # Old shape: should still answer with a balance (legacy fallback)
     assert "15" in data["answer"] or "leave" in data["answer"].lower()
 
 
@@ -714,21 +608,14 @@ def test_old_flat_context_empty_dict_still_works():
 # ===========================================================================
 
 def test_zero_pending_requests_explicitly_stated():
-    data = post_chat(
-        "EMPLOYEE",
-        "How many pending requests do I have?",
-        _employee_context(total=0, leaves=0, docs=0, loans=0, auths=0),
-    )
+    data = post_chat("EMPLOYEE", "How many pending requests do I have?",
+                     _employee_context(total=0, leaves=0, docs=0, loans=0, auths=0))
     answer_lower = data["answer"].lower()
     assert "no" in answer_lower or "0" in answer_lower or "no open" in answer_lower
 
 
 def test_zero_hr_pending_explicitly_stated():
-    data = post_chat(
-        "HR_MANAGER",
-        "How many HR actions are pending?",
-        _hr_context(total=0),
-    )
+    data = post_chat("HR_MANAGER", "How many HR actions are pending?", _hr_context(total=0))
     answer_lower = data["answer"].lower()
     assert "no" in answer_lower or "0" in answer_lower or "up to date" in answer_lower
 
@@ -738,18 +625,14 @@ def test_zero_hr_pending_explicitly_stated():
 # ===========================================================================
 
 def test_employee_cannot_get_hr_total_pending_answer():
-    """EMPLOYEE asking 'how many pending' must get personal, not HR, answer."""
     ctx = _employee_context(total=3)
-    # HR context also provided (should never happen in prod, but defensive test)
     ctx["hr"] = {"totalPendingActions": 99, "leavesPending": 5,
                  "documentsPending": 3, "loansPending": 6,
                  "authorizationsPending": 7, "newUsersPendingApproval": 4}
     data = post_chat("EMPLOYEE", "How many pending requests do I have?", ctx)
-    # Must not expose the HR total (99)
     assert "99" not in data["answer"], (
         f"HR pending count (99) leaked into EMPLOYEE answer: {data['answer']}"
     )
-    # Must use personal total (3)
     assert "3" in data["answer"], f"Expected personal total (3) in answer: {data['answer']}"
 
 
@@ -758,11 +641,8 @@ def test_employee_cannot_get_hr_total_pending_answer():
 # ===========================================================================
 
 def test_employee_pending_answer_mentions_document_pending():
-    data = post_chat(
-        "EMPLOYEE",
-        "How many pending requests do I have?",
-        _employee_context(total=4, leaves=1, docs=2, loans=1, auths=0),
-    )
+    data = post_chat("EMPLOYEE", "How many pending requests do I have?",
+                     _employee_context(total=4, leaves=1, docs=2, loans=1, auths=0))
     answer_lower = data["answer"].lower()
     assert "document" in answer_lower or "2" in data["answer"], (
         f"Expected document count in answer, got: {data['answer']}"
@@ -770,11 +650,8 @@ def test_employee_pending_answer_mentions_document_pending():
 
 
 def test_employee_pending_answer_mentions_loan_pending():
-    data = post_chat(
-        "EMPLOYEE",
-        "How many pending requests do I have?",
-        _employee_context(total=3, leaves=1, docs=1, loans=1, auths=0),
-    )
+    data = post_chat("EMPLOYEE", "How many pending requests do I have?",
+                     _employee_context(total=3, leaves=1, docs=1, loans=1, auths=0))
     answer_lower = data["answer"].lower()
     assert "loan" in answer_lower or "1" in data["answer"], (
         f"Expected loan count in answer, got: {data['answer']}"
@@ -786,31 +663,134 @@ def test_employee_pending_answer_mentions_loan_pending():
 # ===========================================================================
 
 def test_full_employee_context_smoke():
-    """Full EMPLOYEE context with all fields — must not crash and must answer."""
-    data = post_chat(
-        "EMPLOYEE",
-        "What is my annual leave balance?",
-        _employee_context(annual=20, sick=10, total=5, leaves=2, docs=1, loans=1, auths=1),
-    )
+    data = post_chat("EMPLOYEE", "What is my annual leave balance?",
+                     _employee_context(annual=20, sick=10, total=5, leaves=2, docs=1, loans=1, auths=1))
     assert data["answer"]
     assert "20" in data["answer"]
 
 
 def test_full_hr_context_smoke():
-    """Full HR_MANAGER context with all fields — must not crash and must answer."""
-    data = post_chat(
-        "HR_MANAGER",
-        "How many HR actions are pending?",
-        _hr_context(total=15, leaves=4, docs=3, loans=5, auths=3, new_users=2),
-    )
+    data = post_chat("HR_MANAGER", "How many HR actions are pending?",
+                     _hr_context(total=15, leaves=4, docs=3, loans=5, auths=3, new_users=2))
     assert "15" in data["answer"]
 
 
 def test_full_team_leader_context_smoke():
-    """Full TEAM_LEADER context with all fields — must not crash and must answer."""
-    data = post_chat(
-        "TEAM_LEADER",
-        "How many team approvals are waiting?",
-        _team_leader_context(pending_approvals=7),
-    )
+    data = post_chat("TEAM_LEADER", "How many team approvals are waiting?",
+                     _team_leader_context(pending_approvals=7))
     assert "7" in data["answer"]
+
+
+# ===========================================================================
+# 17. documentsAwaitingFile — new field regression tests (v1.4 Spring Boot fix)
+#
+# These tests guard against the bug where documentsAwaitingFile was counted
+# in totalPendingRequests but never exposed in the context breakdown, making
+# the AI assistant's explanation inconsistent with the stated total.
+# ===========================================================================
+
+def test_employee_documents_awaiting_file_in_canonical_case():
+    """
+    Canonical bug-report case:
+      documentsPending=1, documentsAwaitingFile=2, total=3.
+    The answer must:
+      - State the total correctly (3).
+      - Mention the documentsPending bucket separately ("pending review").
+      - Mention the documentsAwaitingFile bucket separately ("waiting for HR").
+      - NOT say 'visible breakdown' (sum == total so explanation is complete).
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_context(total=3, leaves=0, docs=1, docs_awaiting=2, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    answer = data["answer"].lower()
+    assert "3" in data["answer"], f"Expected total '3' in answer: {data['answer']}"
+    assert "pending review" in answer or "pending" in answer, (
+        f"Expected 'pending review' for documentsPending: {data['answer']}"
+    )
+    assert "waiting" in answer or "upload" in answer or "hr" in answer, (
+        f"Expected waiting-for-HR wording for documentsAwaitingFile: {data['answer']}"
+    )
+    assert "visible breakdown" not in answer, (
+        f"Should not show 'visible breakdown' when breakdown is complete: {data['answer']}"
+    )
+
+
+def test_employee_documents_awaiting_file_zero_does_not_appear_in_answer():
+    """
+    When documentsAwaitingFile=0 and documentsPending=1 the answer must not
+    mention the waiting-for-HR state at all.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_context(total=1, leaves=0, docs=1, docs_awaiting=0, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    answer = data["answer"].lower()
+    assert "1" in data["answer"]
+    assert "waiting for hr" not in answer, (
+        f"Zero docs_awaiting should not generate waiting-for-HR text: {data['answer']}"
+    )
+
+
+def test_employee_documents_awaiting_file_drives_my_documents_chip():
+    """
+    When documentsPending=0 but documentsAwaitingFile=2 the My Documents chip
+    must still appear — the chip rule is 'either > 0', not 'documentsPending > 0'.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_context(total=2, leaves=0, docs=0, docs_awaiting=2, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/employee/documents" in routes, (
+        f"My Documents chip must appear when documentsAwaitingFile=2: {routes}"
+    )
+
+
+def test_employee_documents_awaiting_file_breakdown_sum_matches_total():
+    """
+    With docs=1 and docs_awaiting=2 the breakdown sum (1+2=3) must equal
+    totalPendingRequests=3, producing the full (non-visible) breakdown wording.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_context(total=3, leaves=0, docs=1, docs_awaiting=2, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    assert "visible breakdown" not in data["answer"].lower(), (
+        f"Sum equals total — must not show 'visible breakdown': {data['answer']}"
+    )
+    assert "3" in data["answer"]
+
+
+def test_hr_context_with_documents_awaiting_file_parses_without_crash():
+    """
+    HR context that includes documentsAwaitingFile must deserialise without
+    error and return a valid answer to a pending-actions question.
+    This is a schema regression test — verifies FastAPI accepts the new field.
+    """
+    ctx = {
+        "employee": None,
+        "team": None,
+        "hr": {
+            "totalPendingActions": 10,
+            "leavesPending": 3,
+            "documentsPending": 2,
+            "documentsAwaitingFile": 4,   # the new field
+            "loansPending": 1,
+            "authorizationsPending": 0,
+            "newUsersPendingApproval": 0,
+        },
+    }
+    data = post_chat("HR_MANAGER", "How many HR actions are pending?", ctx)
+    assert data["source"] == "local_rules"
+    assert "10" in data["answer"], (
+        f"Expected total '10' in HR pending answer: {data['answer']}"
+    )

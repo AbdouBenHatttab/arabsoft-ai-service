@@ -1534,3 +1534,298 @@ def test_hr_all_personal_doc_request_phrasings_get_redirect(question: str):
         f"Expected management redirect for '{question}': {data['answer']}"
     )
     _assert_no_employee_routes_for_hr(data, question)
+
+
+# ===========================================================================
+# ANS-1. Pending request breakdown correctness (v1.12 fix)
+# ===========================================================================
+
+def _employee_ctx(total, leaves=0, docs=0, docs_awaiting=0, loans=0, auths=0):
+    return {
+        "employee": {
+            "annualAvailableDays": 10, "sickAvailableDays": 5,
+            "totalPendingRequests": total,
+            "leavesPending": leaves,
+            "documentsPending": docs,
+            "documentsAwaitingFile": docs_awaiting,
+            "loansPending": loans,
+            "authorizationsPending": auths,
+        },
+        "team": None, "hr": None,
+    }
+
+
+def test_pending_breakdown_sum_equals_total_uses_full_breakdown():
+    """
+    When sum(breakdown fields) == totalPendingRequests the answer uses the
+    full breakdown wording (colon-separated, no 'visible breakdown' caveat).
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=3, leaves=1, docs=1, loans=1),
+    )
+    assert data["source"] == "local_rules"
+    answer = data["answer"]
+    # Sum matches total (3 = 1+1+1) → plain colon breakdown, no caveat
+    assert "3" in answer
+    assert ":" in answer or "1 leave" in answer.lower()
+    assert "visible breakdown" not in answer.lower(), (
+        f"Should not show 'visible breakdown' when sum == total: {answer}"
+    )
+
+
+def test_pending_breakdown_sum_less_than_total_uses_visible_breakdown_wording():
+    """
+    When sum(breakdown fields) < totalPendingRequests the answer uses the
+    'visible breakdown' wording so the count and the list never contradict.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=6, docs=1, loans=1),   # 6 total but only 2 in breakdown
+    )
+    assert data["source"] == "local_rules"
+    answer = data["answer"]
+    assert "6" in answer, f"Expected total '6' in answer: {answer}"
+    # Must not imply 2 == 6
+    assert "visible breakdown" in answer.lower() or "breakdown" in answer.lower(), (
+        f"Expected 'breakdown' caveat when sum < total: {answer}"
+    )
+    # Must not present it as 'You have 6 requests: 1 document, 1 loan' with a colon
+    # (that would imply the list is complete)
+    if ":" in answer:
+        # Colon is only OK in 'Visible breakdown:' phrasing, not the misleading 'have 6: 1+1' form
+        colon_idx = answer.index(":")
+        before_colon = answer[:colon_idx].lower()
+        assert "6 open" not in before_colon, (
+            f"Misleading 'have 6: partial list' wording detected: {answer}"
+        )
+
+
+def test_pending_documents_nonzero_includes_my_documents_chip():
+    """When documentsPending > 0 the related pages must include My Documents."""
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=2, docs=1, loans=1),
+    )
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/documents" in routes, (
+        f"Expected /employee/documents chip when documentsPending=1: {routes}"
+    )
+
+
+def test_pending_leaves_zero_does_not_include_my_leave_requests_chip():
+    """
+    When leavesPending == 0 the My Leave Requests chip must not appear
+    just because totalPendingRequests > 0.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=2, leaves=0, docs=1, loans=1),
+    )
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/leave" not in routes, (
+        f"/employee/leave must not appear when leavesPending=0: {routes}"
+    )
+
+
+def test_pending_only_loans_nonzero_chip_is_my_loans_only():
+    """Only the loan chip should appear when only loansPending > 0."""
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=1, loans=1),
+    )
+    routes = _routes(data)
+    assert "/employee/loans" in routes
+    assert "/employee/leave" not in routes
+    assert "/employee/documents" not in routes
+
+
+def test_pending_all_breakdown_zero_total_positive_shows_generic_chips():
+    """
+    When totalPendingRequests > 0 but all breakdown fields are 0,
+    fall back to safe generic chips (Leave + Loans).
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=3, leaves=0, docs=0, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    # Generic fallback: at least one page should be present
+    assert len(routes) >= 1
+    # The answer must state the total
+    assert "3" in data["answer"]
+
+
+# ===========================================================================
+# ANS-1b. documentsAwaitingFile breakdown correctness (v1.4 Spring Boot fix)
+# ===========================================================================
+
+def test_pending_documents_awaiting_file_explained_separately_from_pending():
+    """
+    Canonical fix case: documentsPending=1, documentsAwaitingFile=2, total=3.
+    The answer must:
+      - State the correct total (3).
+      - Mention documentsPending as 'pending review' (distinct wording).
+      - Mention documentsAwaitingFile as waiting for HR to upload (distinct wording).
+      - NOT say 'visible breakdown' because sum(1+2) == total(3).
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=3, docs=1, docs_awaiting=2),
+    )
+    assert data["source"] == "local_rules"
+    answer = data["answer"].lower()
+    assert "3" in data["answer"], f"Expected total '3': {data['answer']}"
+    # documentsPending must appear as pending review
+    assert "pending" in answer, f"Expected 'pending' in answer: {data['answer']}"
+    # documentsAwaitingFile must appear as waiting-for-HR upload
+    assert "waiting" in answer or "upload" in answer or "hr" in answer, (
+        f"Expected waiting-for-HR wording: {data['answer']}"
+    )
+    # Must NOT use vague 'visible breakdown' when sum == total
+    assert "visible breakdown" not in answer, (
+        f"'visible breakdown' must not appear when breakdown is complete: {data['answer']}"
+    )
+
+
+def test_pending_documents_awaiting_file_chip_fires_even_when_documents_pending_zero():
+    """
+    My Documents chip must fire when documentsAwaitingFile > 0 even when
+    documentsPending == 0.  The chip rule is (docs_pending > 0 OR docs_awaiting > 0).
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=2, docs=0, docs_awaiting=2),
+    )
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/documents" in routes, (
+        f"My Documents chip must appear when documentsAwaitingFile=2, documentsPending=0: {routes}"
+    )
+
+
+def test_pending_documents_awaiting_file_zero_does_not_mention_hr_upload():
+    """
+    When documentsAwaitingFile=0 the answer must NOT mention the 'waiting for HR
+    to upload' state — that would be a hallucinated breakdown item.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=1, docs=1, docs_awaiting=0),
+    )
+    assert data["source"] == "local_rules"
+    assert "waiting for hr to upload" not in data["answer"].lower(), (
+        f"Zero docs_awaiting must not produce upload wording: {data['answer']}"
+    )
+
+
+def test_pending_loans_awaiting_file_behavior_unchanged():
+    """
+    loansPending already includes loansAwaitingFile (merged on Spring Boot side).
+    This test confirms the merged loan count is stated correctly and that
+    the documentsAwaitingFile change does not disturb loan behavior.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "How many pending requests do I have?",
+        _employee_ctx(total=3, loans=3),   # 3 loans (merged), no docs
+    )
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/loans" in routes
+    assert "3" in data["answer"]
+    # No document chip when no document fields are set
+    assert "/employee/documents" not in routes, (
+        f"/employee/documents must not appear when docs=0 and docs_awaiting=0: {routes}"
+    )
+
+
+# ===========================================================================
+# ANS-2. Annual leave balance zero wording (v1.12 fix)
+# ===========================================================================
+
+def test_annual_balance_zero_does_not_say_submit_new_requests():
+    """When annualAvailableDays == 0 the answer must not say 'submit new requests'."""
+    data = post_chat(
+        "EMPLOYEE",
+        "What is my annual leave balance?",
+        _employee_ctx(total=0),  # annualAvailableDays comes from the dedicated field below
+    )
+    # Override with explicit zero annual days
+    data = post_chat(
+        "EMPLOYEE",
+        "What is my annual leave balance?",
+        {
+            "employee": {
+                "annualAvailableDays": 0, "sickAvailableDays": 5,
+                "totalPendingRequests": 0, "leavesPending": 0,
+                "documentsPending": 0, "loansPending": 0, "authorizationsPending": 0,
+            },
+            "team": None, "hr": None,
+        },
+    )
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "0" in data["answer"], f"Expected '0' in answer: {data['answer']}"
+    assert "submit new requests" not in answer_lower, (
+        f"'submit new requests' must not appear when balance is 0: {data['answer']}"
+    )
+
+
+def test_annual_balance_zero_mentions_blocked_or_unavailable():
+    """When annualAvailableDays == 0 the answer must warn that requests may not be available."""
+    data = post_chat(
+        "EMPLOYEE",
+        "What is my annual leave balance?",
+        {
+            "employee": {
+                "annualAvailableDays": 0, "sickAvailableDays": 5,
+                "totalPendingRequests": 0, "leavesPending": 0,
+                "documentsPending": 0, "loansPending": 0, "authorizationsPending": 0,
+            },
+            "team": None, "hr": None,
+        },
+    )
+    answer_lower = data["answer"].lower()
+    has_caveat = (
+        "may not" in answer_lower
+        or "not available" in answer_lower
+        or "blocked" in answer_lower
+        or "until" in answer_lower
+    )
+    assert has_caveat, (
+        f"Expected a caveat about requests being unavailable when balance=0: {data['answer']}"
+    )
+
+
+def test_annual_balance_positive_still_works():
+    """When annualAvailableDays > 0 the existing wording is preserved."""
+    data = post_chat(
+        "EMPLOYEE",
+        "What is my annual leave balance?",
+        {
+            "employee": {
+                "annualAvailableDays": 14, "sickAvailableDays": 5,
+                "totalPendingRequests": 0, "leavesPending": 0,
+                "documentsPending": 0, "loansPending": 0, "authorizationsPending": 0,
+            },
+            "team": None, "hr": None,
+        },
+    )
+    assert data["source"] == "local_rules"
+    assert "14" in data["answer"]
+    assert "/employee/leave" in _routes(data)
+    # Positive balance → should not show the zero-balance caveat
+    assert "may not be available" not in data["answer"].lower()
