@@ -47,6 +47,34 @@ class TeamContext(BaseModel):
     pendingTeamLeaderApprovals: Optional[int] = None
 
 
+class TeamLeaveDecisionContext(BaseModel):
+    """
+    Safe selected leave request context for Team Leader decision support.
+    Spring Boot performs authorization and data access; FastAPI only explains
+    these already-safe fields and never triggers workflow actions.
+    """
+    available: Optional[bool] = None
+    unavailableReason: Optional[str] = None
+    leaveRequestId: Optional[int] = None
+    employeeDisplayName: Optional[str] = None
+    leaveType: Optional[str] = None
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    deductedWorkingDays: Optional[int] = None
+    status: Optional[str] = None
+    approvalStage: Optional[str] = None
+    reason: Optional[str] = None
+    overlappingApprovedLeaves: Optional[int] = None
+    overlappingPendingLeaves: Optional[int] = None
+    teamMemberCount: Optional[int] = None
+    activeTaskCount: Optional[int] = None
+    dueSoonTaskCount: Optional[int] = None
+    overdueTaskCount: Optional[int] = None
+    highPriorityTaskCount: Optional[int] = None
+    workloadContextAvailable: Optional[bool] = None
+    overlapContextAvailable: Optional[bool] = None
+
+
 class HrContext(BaseModel):
     """
     HR management context — present for HR_MANAGER role only.
@@ -91,6 +119,7 @@ class ContextInfo(BaseModel):
     employee: Optional[EmployeeContext] = None
     team: Optional[TeamContext] = None
     hr: Optional[HrContext] = None
+    teamLeaveDecision: Optional[TeamLeaveDecisionContext] = None
 
     # Legacy flat fields — kept for backward compatibility with old test fixtures
     leave: Optional[Dict[str, Any]] = Field(default_factory=dict)

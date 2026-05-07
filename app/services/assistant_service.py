@@ -34,6 +34,7 @@ Invariants:
 
 from app.schemas import ChatRequest, ChatResponse
 from app.services.refusal_rules import get_refusal
+from app.services.decision_support_service import get_decision_support_response
 from app.services.drafting_service import get_draft_response
 from app.services.platform_help_service import get_platform_help
 from app.services.response_sanitizer import sanitize_response
@@ -42,6 +43,14 @@ from app.clients.gemini_client import call_gemini
 
 
 def process_chat(request: ChatRequest) -> ChatResponse:
+
+    # --- Step 0: Team Leader selected-leave decision support --------------
+    # Narrow exception before refusal: "Should I approve this leave?" is an
+    # assessment request, not a command to perform approval. Direct action
+    # commands such as "approve this leave" still fall through to refusal.
+    decision_support_response = get_decision_support_response(request)
+    if decision_support_response:
+        return decision_support_response
 
     # --- Step 1: Refusal check ------------------------------------------
     # Must always run first. Prevents action directives from reaching any
