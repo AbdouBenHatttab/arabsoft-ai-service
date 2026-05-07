@@ -884,6 +884,9 @@ _DOCUMENT_NOTIFY_PHRASES: tuple[str, ...] = (
     "email notification",
     "document ready",
     "document is ready",
+    "documents ready",
+    "documents are ready",
+    "are my documents ready",
     "certificate ready",
     "certificate is ready",
     "document uploaded",
@@ -930,6 +933,59 @@ def _handle_document_notification(
 
     if not (is_notify or is_access):
         return None
+
+    is_readiness = any(
+        phrase in q
+        for phrase in (
+            "document ready",
+            "document is ready",
+            "documents ready",
+            "documents are ready",
+            "are my documents ready",
+            "certificate ready",
+            "certificate is ready",
+        )
+    )
+    if is_readiness:
+        emp = request.context.employee if request.context else None
+        if emp is None:
+            answer = (
+                "Check My Documents for downloadable files. "
+                "You will receive an in-app notification or email when HR finishes preparation."
+            )
+        else:
+            documents_pending = emp.documentsPending if emp.documentsPending is not None else 0
+            docs_awaiting = emp.documentsAwaitingFile if emp.documentsAwaitingFile is not None else 0
+            parts = []
+            if docs_awaiting > 0:
+                parts.append(
+                    f"{docs_awaiting} document{'s' if docs_awaiting != 1 else ''} "
+                    "are still waiting for HR to upload or prepare the final file"
+                )
+            if documents_pending > 0:
+                parts.append(
+                    f"{documents_pending} document request{'s' if documents_pending != 1 else ''} "
+                    "are still pending review or preparation"
+                )
+            if parts:
+                answer = (
+                    f"{'; '.join(parts)}. "
+                    "Ready documents can be downloaded from My Documents. "
+                    "You will receive a notification or email when HR finishes preparation."
+                )
+            else:
+                answer = (
+                    "I do not see pending document preparation from the available context. "
+                    "Check My Documents for downloadable files."
+                )
+
+        return ChatResponse(
+            answer=answer,
+            relatedPages=[
+                RelatedPage(label="My Documents",  route="/employee/documents"),
+                RelatedPage(label="Notifications", route="/employee/notifications"),
+            ],
+        )
 
     if is_notify:
         # Case A: the user wants to know when/how HR will tell them

@@ -89,6 +89,40 @@ def test_employee_document_notification_do_i_get_notified():
     assert "/employee/documents" in _routes(data)
 
 
+def test_employee_documents_ready_uses_local_rules_and_pages():
+    data = post_chat("EMPLOYEE", "Are my documents ready?")
+    assert data["source"] == "local_rules"
+    routes = _routes(data)
+    assert "/employee/documents" in routes, f"Expected /employee/documents, got {routes}"
+    assert "/employee/notifications" in routes, f"Expected /employee/notifications, got {routes}"
+    _assert_no_fake_routes(data)
+
+
+def test_employee_documents_ready_zero_context_does_not_invent_ready_documents():
+    data = post_chat(
+        "EMPLOYEE",
+        "Are my documents ready?",
+        {
+            "employee": {
+                "annualAvailableDays": 10, "sickAvailableDays": 5,
+                "totalPendingRequests": 0, "leavesPending": 0,
+                "documentsPending": 0, "documentsAwaitingFile": 0,
+                "loansPending": 0, "authorizationsPending": 0,
+            },
+            "team": None,
+            "hr": None,
+        },
+    )
+    answer_lower = data["answer"].lower()
+    assert "your documents are ready" not in answer_lower, (
+        f"Invented document readiness: {data['answer']}"
+    )
+    assert "ready documents: 0" not in answer_lower and "0 ready" not in answer_lower, (
+        f"Invented ready document count: {data['answer']}"
+    )
+    assert "downloadable files" in answer_lower
+
+
 # ===========================================================================
 # 2. EMPLOYEE: email notification for certificate upload
 # ===========================================================================

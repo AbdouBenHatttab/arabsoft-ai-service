@@ -234,6 +234,54 @@ def test_employee_sick_leave_does_not_leak_annual_value():
     )
 
 
+def test_employee_document_readiness_awaiting_file_uses_context():
+    data = post_chat(
+        "EMPLOYEE",
+        "Are my documents ready?",
+        _employee_context(total=2, leaves=0, docs=0, docs_awaiting=2, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "2" in data["answer"], f"Expected awaiting-file count '2': {data['answer']}"
+    assert (
+        "waiting" in answer_lower
+        and ("upload" in answer_lower or "hr" in answer_lower or "final file" in answer_lower)
+    ), f"Expected waiting/upload/HR/final file wording: {data['answer']}"
+    assert "ready documents can be downloaded" in answer_lower
+    assert "2 ready" not in answer_lower and "2 document(s) ready" not in answer_lower, (
+        f"Invented ready document count: {data['answer']}"
+    )
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/employee/documents" in routes
+    assert "/employee/notifications" in routes
+
+
+def test_employee_document_readiness_pending_review_uses_context():
+    data = post_chat(
+        "EMPLOYEE",
+        "Are my documents ready?",
+        _employee_context(total=1, leaves=0, docs=1, docs_awaiting=0, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "1" in data["answer"], f"Expected pending document count '1': {data['answer']}"
+    assert "pending" in answer_lower
+    assert "review" in answer_lower or "preparation" in answer_lower
+
+
+def test_employee_document_readiness_zero_context_does_not_claim_ready():
+    data = post_chat(
+        "EMPLOYEE",
+        "Are my documents ready?",
+        _employee_context(total=0, leaves=0, docs=0, docs_awaiting=0, loans=0, auths=0),
+    )
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "i do not see pending document preparation from the available context" in answer_lower
+    assert "check my documents for downloadable files" in answer_lower
+    assert "your documents are ready" not in answer_lower
+
+
 # ===========================================================================
 # 4. TEAM_LEADER: team approvals uses context.team.pendingTeamLeaderApprovals
 # ===========================================================================
