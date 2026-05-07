@@ -55,6 +55,8 @@ _PERSONAL_EMPLOYEE_PHRASES: frozenset[str] = frozenset([
     "my loan request",
     "my loan",
     # leave submission
+    "can i request leave",
+    "request leave",
     "submit my own leave",
     "submit my leave",
     "submit a leave request",
@@ -78,10 +80,6 @@ _PERSONAL_EMPLOYEE_PHRASES: frozenset[str] = frozenset([
     "my personal requests",
     "show my requests",
     "my requests",
-    "how many pending requests do i",
-    "do i have pending",
-    "my pending requests",
-    "my open requests",
 ])
 
 
@@ -386,7 +384,8 @@ def _handle_hr_dashboard_counts(
 
     # General pending action count questions
     _action_phrases = ("how many hr", "hr pending", "pending actions", "total pending",
-                       "platform pending", "how many actions", "platform actions")
+                       "platform pending", "how many actions", "platform actions",
+                       "pending requests", "open requests")
     is_action_q = any(phrase in q for phrase in _action_phrases)
 
     if not (is_new_user_q or is_action_q):
@@ -452,7 +451,9 @@ def _handle_hr_dashboard_counts(
         answer=answer,
         relatedPages=[
             RelatedPage(label="HR Dashboard",    route="/hr/dashboard"),
+            RelatedPage(label="Leave Approvals", route="/hr/approvals"),
             RelatedPage(label="All HR Requests", route="/hr/requests"),
+            RelatedPage(label="User Management", route="/hr/users"),
         ],
     )
 
@@ -478,7 +479,10 @@ def _handle_team_leader_approvals(
         return None
 
     _approval_phrases = ("team approval", "approvals waiting", "approvals pending",
-                         "how many approvals", "pending approvals", "team pending")
+                         "how many approvals", "pending approvals", "team pending",
+                         "pending team request", "pending team requests",
+                         "do i have pending team request",
+                         "how many pending team request")
     if not any(phrase in q for phrase in _approval_phrases):
         return None
 

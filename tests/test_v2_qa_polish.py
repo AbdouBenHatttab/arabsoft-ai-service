@@ -1196,6 +1196,38 @@ def test_tl_team_leave_requests_text_still_mentions_personal_separation():
     )
 
 
+def test_tl_pending_team_requests_uses_count_not_generic_navigation():
+    """'Do I have pending team requests?' -> team pending count, not generic team navigation."""
+    data = post_chat(
+        "TEAM_LEADER",
+        "Do I have pending team requests?",
+        {
+            "employee": {
+                "annualAvailableDays": 8, "sickAvailableDays": 3,
+                "totalPendingRequests": 1, "leavesPending": 1,
+                "documentsPending": 0, "loansPending": 0, "authorizationsPending": 0,
+            },
+            "team": {
+                "teamName": "Alpha", "memberCount": 5,
+                "pendingTeamLeaderApprovals": 3,
+            },
+            "hr": None,
+        },
+    )
+    assert data["source"] == "local_rules"
+    assert "3" in data["answer"], f"Expected team pending count '3': {data['answer']}"
+    answer_lower = data["answer"].lower()
+    assert "manage your team" not in answer_lower, (
+        f"Expected count answer, got generic team navigation: {data['answer']}"
+    )
+    routes = _routes(data)
+    assert "/team/requests" in routes, f"Expected /team/requests: {routes}"
+    assert "/team/calendar" in routes, f"Expected /team/calendar: {routes}"
+    assert "/employee/leave" not in routes, (
+        f"/employee/leave chip must not appear for team pending request count: {routes}"
+    )
+
+
 def test_tl_track_my_leave_still_personal_after_availability_handler():
     """'How do I track my leave?' must still return My Leave Requests only (not team routes)."""
     data = post_chat("TEAM_LEADER", "How do I track my leave?")

@@ -275,6 +275,68 @@ def test_team_leader_pending_approvals_singular():
     assert "1" in data["answer"], f"Expected '1' in answer, got: {data['answer']}"
 
 
+def test_team_leader_pending_team_requests_uses_team_context_count():
+    data = post_chat(
+        "TEAM_LEADER",
+        "Do I have pending team requests?",
+        _team_leader_context(pending_approvals=3),
+    )
+    assert data["source"] == "local_rules"
+    assert "3" in data["answer"], f"Expected '3' in answer, got: {data['answer']}"
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/team/requests" in routes, f"Expected /team/requests, got {routes}"
+    assert "/team/calendar" in routes, f"Expected /team/calendar, got {routes}"
+    assert not any(route.startswith("/employee/") for route in routes), (
+        f"Employee route leaked into team pending answer: {routes}"
+    )
+
+
+def test_team_leader_pending_team_requests_zero_count_is_explicit():
+    data = post_chat(
+        "TEAM_LEADER",
+        "Do I have pending team requests?",
+        _team_leader_context(pending_approvals=0),
+    )
+    assert data["source"] == "local_rules"
+    answer_lower = data["answer"].lower()
+    assert "no" in answer_lower or "0" in answer_lower or "caught up" in answer_lower, (
+        f"Expected explicit zero pending team request answer, got: {data['answer']}"
+    )
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/team/requests" in routes, f"Expected /team/requests, got {routes}"
+    assert not any(route.startswith("/employee/") for route in routes), (
+        f"Employee route leaked into team pending zero answer: {routes}"
+    )
+
+
+def test_team_leader_pending_team_requests_missing_count_does_not_invent():
+    data = post_chat(
+        "TEAM_LEADER",
+        "Do I have pending team requests?",
+        _team_leader_context(pending_approvals=None),
+    )
+    assert data["source"] == "local_rules"
+    import re
+    assert not re.search(r"there (?:are|is) \d+ (?:leave|request)", data["answer"].lower()), (
+        f"Invented pending team request count in answer: {data['answer']}"
+    )
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/team/requests" in routes, f"Expected /team/requests, got {routes}"
+    assert not any(route.startswith("/employee/") for route in routes), (
+        f"Employee route leaked into team pending unknown answer: {routes}"
+    )
+
+
+def test_team_leader_track_own_leave_still_personal_after_team_pending_fix():
+    data = post_chat("TEAM_LEADER", "How do I track my own leave?")
+    assert data["source"] == "local_rules"
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert "/employee/leave" in routes, f"Expected /employee/leave, got {routes}"
+    assert not any(route.startswith("/team/") for route in routes), (
+        f"Team route leaked into personal leave tracking: {routes}"
+    )
+
+
 # ===========================================================================
 # 4-B. TeamContext.pendingTeamLeaderApprovals: absent-key, zero, and positive
 # ===========================================================================
@@ -408,6 +470,49 @@ def test_hr_manager_platform_pending_question():
     assert "7" in data["answer"], f"Expected '7' in answer, got: {data['answer']}"
 
 
+def test_hr_manager_my_pending_requests_uses_hr_pending_actions():
+    data = post_chat("HR_MANAGER", "How many pending requests do I have?", _hr_context(total=7))
+    assert data["source"] == "local_rules"
+    assert "7" in data["answer"], f"Expected '7' in answer, got: {data['answer']}"
+    answer_lower = data["answer"].lower()
+    assert "management account" not in answer_lower, (
+        f"HR pending request count should not use personal-account redirect: {data['answer']}"
+    )
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert routes
+    assert all(route.startswith("/hr/") for route in routes), f"Expected HR-only routes, got: {routes}"
+    assert not any(route.startswith("/employee/") for route in routes), (
+        f"Employee route leaked into HR pending answer: {routes}"
+    )
+
+
+def test_hr_manager_my_pending_requests_missing_total_does_not_invent_count():
+    ctx = {
+        "employee": None,
+        "team": None,
+        "hr": {
+            "totalPendingActions": None,
+            "leavesPending": None,
+            "documentsPending": None,
+            "loansPending": None,
+            "authorizationsPending": None,
+            "newUsersPendingApproval": None,
+        },
+    }
+    data = post_chat("HR_MANAGER", "How many pending requests do I have?", ctx)
+    assert data["source"] == "local_rules"
+    import re
+    assert not re.search(r"there (?:are|is) \d+ pending", data["answer"].lower()), (
+        f"Invented HR pending count in answer: {data['answer']}"
+    )
+    routes = [p["route"] for p in data["relatedPages"]]
+    assert routes
+    assert all(route.startswith("/hr/") for route in routes), f"Expected HR-only routes, got: {routes}"
+    assert not any(route.startswith("/employee/") for route in routes), (
+        f"Employee route leaked into HR pending answer: {routes}"
+    )
+
+
 # ===========================================================================
 # 6. HR_MANAGER: new user count uses context.hr.newUsersPendingApproval
 # ===========================================================================
@@ -450,6 +555,24 @@ def test_hr_manager_leave_balance_redirected_not_context_value():
 
 def test_hr_manager_annual_leave_question_redirected():
     data = post_chat("HR_MANAGER", "What is my annual leave balance?", {})
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower
+
+
+def test_hr_manager_request_leave_still_redirected():
+    data = post_chat("HR_MANAGER", "Can I request leave?", {})
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower
+
+
+def test_hr_manager_request_loan_still_redirected():
+    data = post_chat("HR_MANAGER", "Can I request a loan?", {})
+    answer_lower = data["answer"].lower()
+    assert "management account" in answer_lower or "hr manager" in answer_lower
+
+
+def test_hr_manager_request_document_still_redirected():
+    data = post_chat("HR_MANAGER", "Can I request a document?", {})
     answer_lower = data["answer"].lower()
     assert "management account" in answer_lower or "hr manager" in answer_lower
 
