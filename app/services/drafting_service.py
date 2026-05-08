@@ -1579,6 +1579,10 @@ def _resolve_structured_fields(
     absenceDate, those fields are repaired using the local extractor so that
     TIME_PERMISSION and absenceDate are never left null when present in the
     original user text.
+
+    For LOAN_REQUEST: if Gemini returns missing/null/invalid loan fields, the
+    local extractor repairs them from the original user text. Amount and
+    repaymentMonths are normalized to numeric values when possible.
     """
     if draft_type == _TYPE_IMPROVE:
         return None, []
@@ -1611,6 +1615,8 @@ def _resolve_structured_fields(
         # so TIME_PERMISSION and absenceDate are never null when present in the original text.
         if draft_type == _TYPE_AUTH:
             fields, missing = _repair_auth_fields_from_local(question, fields, missing)
+        elif draft_type == _TYPE_LOAN:
+            fields, missing = _repair_loan_fields_from_local(question, fields, missing)
 
         return fields, missing
 
@@ -1686,6 +1692,130 @@ def _repair_auth_fields_from_local(
         for key in check_keys:
             if repaired.get(key) is None:
                 missing.append(key)
+
+    return repaired, missing
+
+
+def _normalize_loan_amount_value(raw: object) -> Optional[int | float]:
+    """
+    Convert a loan amount to a numeric value when possible.
+
+    Accepts values such as:
+    - 5000
+    - "5000"
+    - "5000 TND"
+    - "2,500 TND"
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else raw
+    if not isinstance(raw, str):
+        return None
+
+    text = raw.strip().replace(",", "")
+    m = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not m:
+        return None
+    num_text = m.group(1)
+    try:
+        value = float(num_text)
+    except ValueError:
+        return None
+    return int(value) if value.is_integer() else value
+
+
+def _repair_loan_fields_from_local(
+    question: str,
+    gemini_fields: dict,
+    gemini_missing: list[str],
+) -> tuple[dict, list[str]]:
+    """
+    For LOAN_REQUEST: if Gemini left a loan field null or invalid, run the local
+    extractor against the original user text and fill those gaps.
+
+    Rules:
+    - Only fills null/invalid fields — never overwrites valid Gemini values.
+    - Repairs: amount, loanType, reason, repaymentMonths.
+    - Amount and repaymentMonths are normalized to numeric values when possible.
+    - Recomputes missingFields list after repair.
+    """
+    local_fields, _ = extract_draft_fields(question, _TYPE_LOAN)
+    if local_fields is None:
+        return gemini_fields, gemini_missing
+
+    repaired = dict(gemini_fields)
+    supported_loan_types = {
+        "PERSONAL_ADVANCE",
+        "EMERGENCY_LOAN",
+        "EDUCATION_LOAN",
+        "MEDICAL_ADVANCE",
+        "HOUSING_ADVANCE",
+    }
+
+    current_amount = repaired.get("amount")
+
+    current_loan_type = repaired.get("loanType")
+    current_reason = repaired.get("reason")
+    current_repayment = repaired.get("repaymentMonths")
+
+    needs_loan_type_repair = current_loan_type not in supported_loan_types
+    needs_reason_repair = current_reason is None
+    needs_repayment_repair = not isinstance(current_repayment, int) or not (1 <= current_repayment <= 120)
+    needs_amount_repair = current_amount is None or needs_loan_type_repair
+
+    repair_needed = (
+        needs_amount_repair
+        or needs_loan_type_repair
+        or needs_reason_repair
+        or needs_repayment_repair
+    )
+
+    if not repair_needed:
+        return gemini_fields, gemini_missing
+
+    if needs_amount_repair:
+        normalized_amount = _normalize_loan_amount_value(current_amount)
+        if normalized_amount is None:
+            normalized_amount = _normalize_loan_amount_value(local_fields.get("amount"))
+        if normalized_amount is not None:
+            repaired["amount"] = normalized_amount
+        elif current_amount is None and local_fields.get("amount") is not None:
+            repaired["amount"] = local_fields["amount"]
+
+    if needs_loan_type_repair:
+        local_loan_type = local_fields.get("loanType")
+        if local_loan_type in supported_loan_types:
+            repaired["loanType"] = local_loan_type
+
+    if needs_reason_repair and local_fields.get("reason") is not None:
+        repaired["reason"] = local_fields["reason"]
+
+    if needs_repayment_repair:
+        local_repayment = local_fields.get("repaymentMonths")
+        if isinstance(local_repayment, int) and 1 <= local_repayment <= 120:
+            repaired["repaymentMonths"] = local_repayment
+        elif isinstance(current_repayment, str):
+            try:
+                parsed = int(current_repayment.strip())
+            except ValueError:
+                parsed = None
+            if parsed is not None and 1 <= parsed <= 120:
+                repaired["repaymentMonths"] = parsed
+
+    missing: list[str] = []
+    if repaired.get("amount") is None:
+        missing.append("amount")
+    if repaired.get("loanType") not in supported_loan_types:
+        repaired["loanType"] = None
+        missing.append("loanType")
+    if repaired.get("reason") is None:
+        missing.append("reason")
+    if not isinstance(repaired.get("repaymentMonths"), int):
+        repaired["repaymentMonths"] = None
+        missing.append("repaymentMonths")
 
     return repaired, missing
 

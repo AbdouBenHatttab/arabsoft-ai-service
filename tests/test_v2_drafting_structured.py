@@ -617,6 +617,113 @@ def test_gemini_loan_structured_fields_used():
     assert data["missingFields"] == []
 
 
+def test_gemini_loan_missing_type_repairs_from_local_extraction():
+    structured = {
+        "amount": "5000 TND",
+        "loanType": None,
+        "reason": "home renovation",
+        "repaymentMonths": 12,
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_http_drafting(
+            mh,
+            draft_text="Dear HR, I request a loan of 5000 TND.",
+            answer="Here is your loan request draft.",
+            structured_fields=structured,
+        )
+        data = post_chat(
+            "EMPLOYEE",
+            "I need a loan of 5000 TND for home renovation over 12 months",
+        )
+
+    assert data["source"] == "external_ai"
+    assert data["draftType"] == "LOAN_REQUEST"
+    assert data["draftFields"]["amount"] == 5000
+    assert data["draftFields"]["loanType"] == "HOUSING_ADVANCE"
+    assert data["draftFields"]["reason"] == "home renovation"
+    assert data["draftFields"]["repaymentMonths"] == 12
+    assert "loanType" not in data["missingFields"]
+
+
+def test_gemini_loan_repayment_months_null_is_repaired():
+    structured = {
+        "amount": "3000 TND",
+        "loanType": "MEDICAL_ADVANCE",
+        "reason": "medical expenses",
+        "repaymentMonths": None,
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_http_drafting(
+            mh,
+            draft_text="Dear HR, I request a medical advance.",
+            answer="Here is your loan request draft.",
+            structured_fields=structured,
+        )
+        data = post_chat(
+            "EMPLOYEE",
+            "I want a loan for 3000 dinars for medical expenses and repay over 10 months.",
+        )
+
+    assert data["draftType"] == "LOAN_REQUEST"
+    assert data["draftFields"]["loanType"] == "MEDICAL_ADVANCE"
+    assert data["draftFields"]["repaymentMonths"] == 10
+    assert "repaymentMonths" not in data["missingFields"]
+
+
+def test_gemini_loan_valid_type_is_preserved():
+    structured = {
+        "amount": "3000 TND",
+        "loanType": "MEDICAL_ADVANCE",
+        "reason": "medical expenses",
+        "repaymentMonths": 10,
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_http_drafting(
+            mh,
+            draft_text="Dear HR, I request a medical advance.",
+            answer="Here is your loan request draft.",
+            structured_fields=structured,
+        )
+        data = post_chat(
+            "EMPLOYEE",
+            "I want a loan for 3000 dinars for medical expenses and repay over 10 months.",
+        )
+
+    assert data["draftType"] == "LOAN_REQUEST"
+    assert data["draftFields"]["loanType"] == "MEDICAL_ADVANCE"
+    assert data["draftFields"]["amount"] == "3000 TND"
+    assert data["missingFields"] == []
+
+
+def test_gemini_loan_vague_request_keeps_loan_type_missing():
+    structured = {
+        "amount": "5000 TND",
+        "loanType": None,
+        "reason": None,
+        "repaymentMonths": None,
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_http_drafting(
+            mh,
+            draft_text="Dear HR, I request a loan.",
+            answer="Here is your loan request draft.",
+            structured_fields=structured,
+        )
+        data = post_chat("EMPLOYEE", "I need a loan of 5000 TND over 12 months.")
+
+    assert data["draftType"] == "LOAN_REQUEST"
+    assert data["draftFields"]["loanType"] is None
+    assert "loanType" in data["missingFields"]
+
+
 # ===========================================================================
 # 12. Gemini enabled with null structuredFields values: missingFields computed
 # ===========================================================================
@@ -661,9 +768,9 @@ def test_gemini_loan_partial_null_adds_missing():
             answer="Here is a loan draft.",
             structured_fields=structured,
         )
-        data = post_chat("EMPLOYEE", "Write a professional loan justification for 3000 TND.")
+        data = post_chat("EMPLOYEE", "I need a loan of 3000 TND.")
 
-    assert data["draftFields"]["amount"] == "3000 TND"
+    assert data["draftFields"]["amount"] == 3000
     assert data["draftFields"]["reason"] is None
     assert "reason" in data["missingFields"]
     assert "amount" not in data["missingFields"]
