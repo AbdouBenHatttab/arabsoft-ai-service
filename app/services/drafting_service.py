@@ -675,6 +675,19 @@ _AMOUNT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_REPAYMENT_MONTHS_PATTERN = re.compile(
+    r"(?:over|repay\s+over|for|in)\s+(\d{1,3})\s+months?\b",
+    re.IGNORECASE,
+)
+
+_LOAN_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("PERSONAL_ADVANCE", ["personal advance", "personal loan", "salary advance", "salary loan"]),
+    ("EMERGENCY_LOAN", ["emergency loan", "family emergency", "urgent emergency", "emergency"]),
+    ("EDUCATION_LOAN", ["education loan", "educational loan", "education fees", "tuition", "study fees"]),
+    ("MEDICAL_ADVANCE", ["medical advance", "medical loan", "medical expenses", "health expenses"]),
+    ("HOUSING_ADVANCE", ["housing advance", "home loan", "housing loan", "home renovation", "home repairs", "house repairs"]),
+]
+
 
 def _extract_dates(text: str) -> list[str]:
     found: list[str] = []
@@ -717,11 +730,35 @@ def _extract_reason(text: str) -> Optional[str]:
 
 
 def _extract_amount(text: str) -> Optional[str]:
-    m = _AMOUNT_PATTERN.search(text)
-    if m:
+    for m in _AMOUNT_PATTERN.finditer(text):
         val = m.group(1).strip().rstrip(",.")
-        if re.search(r"\d", val):
-            return val
+        if not re.search(r"\d", val):
+            continue
+        tail = text[m.end():].lstrip().lower()
+        if tail.startswith("month") or tail.startswith("months"):
+            continue
+        return val
+    return None
+
+
+def _extract_repayment_months(text: str) -> Optional[int]:
+    m = _REPAYMENT_MONTHS_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        months = int(m.group(1))
+    except ValueError:
+        return None
+    if 1 <= months <= 120:
+        return months
+    return None
+
+
+def _extract_loan_type(text: str) -> Optional[str]:
+    q = text.lower()
+    for loan_type, keywords in _LOAN_TYPE_KEYWORDS:
+        if any(kw in q for kw in keywords):
+            return loan_type
     return None
 
 
@@ -907,13 +944,24 @@ def extract_draft_fields(
 
     if draft_type == _TYPE_LOAN:
         amount = _extract_amount(question)
+        loan_type = _extract_loan_type(question)
         reason = _extract_reason(question)
-        fields = {"amount": amount, "reason": reason}
+        repayment_months = _extract_repayment_months(question)
+        fields = {
+            "amount": amount,
+            "loanType": loan_type,
+            "reason": reason,
+            "repaymentMonths": repayment_months,
+        }
         missing = []
         if amount is None:
             missing.append("amount")
+        if loan_type is None:
+            missing.append("loanType")
         if reason is None:
             missing.append("reason")
+        if repayment_months is None:
+            missing.append("repaymentMonths")
         return fields, missing
 
     if draft_type == _TYPE_AUTH:
@@ -1317,7 +1365,7 @@ For IMPROVE_TEXT: produce ONLY a polished rewrite of the text the user provided.
 
 structuredFields schema by draftType:
   LEAVE_REQUEST:    { "leaveType": null, "startDate": null, "endDate": null, "reason": null }
-  LOAN_REQUEST:     { "amount": null, "reason": null }
+  LOAN_REQUEST:     { "amount": null, "loanType": null, "reason": null, "repaymentMonths": null }
   AUTHORIZATION_REQUEST: { "authorizationType": null, "absenceDate": null, "fromTime": null, "toTime": null, "reason": null }
   DOCUMENT_REQUEST: { "documentType": null, "purpose": null, "extraDetails": null }
   For DOCUMENT_REQUEST, documentType MUST be one of these exact enum values (uppercase, underscored):
@@ -1393,7 +1441,7 @@ def _build_drafting_user_message(question: str, draft_type: str) -> str:
         f"Draft type: {draft_type}\n"
         f"User request: {question}\n\n"
         "Write a professional draft following the rules above. "
-        "Use placeholders like [date], [reason], [amount] wherever specific details are missing. "
+        "Use placeholders like [date], [reason], [amount], [repayment period] wherever specific details are missing. "
         "For structuredFields, extract only what the user explicitly stated; use null for the rest."
     )
 
@@ -1650,7 +1698,7 @@ def _is_explicit_leave_type(question: str, leave_type: str) -> bool:
 def _expected_keys_for_type(draft_type: str) -> list[str]:
     _EXPECTED: dict[str, list[str]] = {
         _TYPE_LEAVE: ["leaveType", "startDate", "endDate", "reason"],
-        _TYPE_LOAN: ["amount", "reason"],
+        _TYPE_LOAN: ["amount", "loanType", "reason", "repaymentMonths"],
         # AUTHORIZATION_REQUEST: TIME_PERMISSION shape as default.
         # _repair_auth_fields_from_local handles shape switching for EQUIPMENT_REQUEST.
         _TYPE_AUTH: ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"],

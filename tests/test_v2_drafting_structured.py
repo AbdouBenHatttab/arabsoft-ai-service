@@ -13,8 +13,8 @@ Coverage:
   3.  Emergency/family-emergency does NOT produce unsupported EMERGENCY leave type.
   4.  Sick leave with one date has endDate=null and "endDate" in missingFields.
   5.  Leave request with no leave type: leaveType=null, "leaveType" in missingFields.
-  6.  Loan request extracts amount and reason.
-  7.  Loan request without amount: "amount" in missingFields.
+  6.  Loan request extracts amount, loanType, reason, repaymentMonths.
+  7.  Loan request without repaymentMonths: "repaymentMonths" in missingFields.
   8.  Authorization request extracts absenceDate, fromTime, toTime, reason (V3.2: TIME_PERMISSION sub-type).
   9.  Document request extracts documentType and purpose.
   10. improve_text gives draftType=IMPROVE_TEXT, draftFields=None, missingFields=[].
@@ -27,7 +27,7 @@ Coverage:
   17. draftType is set for all structured drafting responses.
   18. draftFields has stable shape (all expected keys present) for structured types.
   19. missingFields is always a list, never null.
-  20. LOAN_REQUEST draftFields always has "amount" and "reason" keys.
+  20. LOAN_REQUEST draftFields always has "amount", "loanType", "reason", "repaymentMonths" keys.
   21. AUTHORIZATION_REQUEST draftFields always has all five expected keys.
   22. DOCUMENT_REQUEST draftFields always has "documentType", "purpose", "extraDetails".
   23. Local extractor unit — extract_draft_fields LEAVE_REQUEST with full details.
@@ -272,41 +272,98 @@ def test_leave_request_missing_type_leaveType_null():
 
 
 # ===========================================================================
-# 6. Loan request: amount and reason extracted
+# 6. Loan request: amount, loanType, reason, repaymentMonths extracted
 # ===========================================================================
 
-def test_loan_request_extracts_amount_and_reason():
-    """Amount and reason must both be extracted."""
+def test_loan_request_extracts_amount_reason_and_repayment():
+    """Amount, loanType, reason, and repaymentMonths must all be extracted."""
     fields, missing = extract_draft_fields(
-        "Help me request a loan for 2000 TND because of family expenses.",
+        "Help me request a loan of 2000 TND for home renovation over 12 months because of family expenses.",
         "LOAN_REQUEST",
     )
     assert fields["amount"] is not None
     assert "2000" in fields["amount"]
+    assert fields["loanType"] == "HOUSING_ADVANCE"
     assert fields["reason"] is not None
     assert "family" in fields["reason"].lower() or "expenses" in fields["reason"].lower()
+    assert fields["repaymentMonths"] == 12
     assert missing == []
 
 
-def test_loan_request_via_api_extracts_amount():
+def test_loan_request_via_api_extracts_full_fields():
     data = post_chat(
         "EMPLOYEE",
-        "Help me request a loan for 2000 TND because of family expenses.",
+        "Help me request a loan of 2000 TND for home renovation over 12 months because of family expenses.",
     )
     assert data["draftType"] == "LOAN_REQUEST"
     assert data["draftFields"]["amount"] is not None
     assert "2000" in data["draftFields"]["amount"]
+    assert data["draftFields"]["loanType"] == "HOUSING_ADVANCE"
     assert data["draftFields"]["reason"] is not None
+    assert data["draftFields"]["repaymentMonths"] == 12
     assert data["missingFields"] == []
 
 
 def test_loan_with_currency_extracted():
     fields, missing = extract_draft_fields(
-        "Write a loan justification for 500 EUR because of home repairs.",
+        "Write a loan justification for 500 EUR because of home repairs in 6 months.",
         "LOAN_REQUEST",
     )
     assert fields["amount"] is not None
     assert "500" in fields["amount"]
+    assert fields["repaymentMonths"] == 6
+
+
+def test_loan_request_missing_repayment_months_adds_to_missing():
+    fields, missing = extract_draft_fields(
+        "Write a professional loan justification because I need it for medical treatment.",
+        "LOAN_REQUEST",
+    )
+    assert fields["repaymentMonths"] is None
+    assert "repaymentMonths" in missing
+
+
+def test_loan_request_missing_reason_adds_to_missing():
+    fields, missing = extract_draft_fields(
+        "Help me request a loan of 3000 TND over 10 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["reason"] is None
+    assert "reason" in missing
+
+
+def test_loan_request_missing_amount_adds_to_missing():
+    fields, missing = extract_draft_fields(
+        "Help me request a loan for home renovation over 12 months because of family expenses.",
+        "LOAN_REQUEST",
+    )
+    assert fields["amount"] is None
+    assert "amount" in missing
+
+
+def test_loan_request_over_phrase_extracts_repayment_months():
+    fields, _ = extract_draft_fields(
+        "I need a loan of 5000 TND for home renovation over 12 months because of family expenses.",
+        "LOAN_REQUEST",
+    )
+    assert fields["repaymentMonths"] == 12
+
+
+def test_loan_request_repay_over_phrase_extracts_repayment_months():
+    fields, _ = extract_draft_fields(
+        "I want to request 3000 dinars for medical expenses and repay over 10 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["repaymentMonths"] == 10
+
+
+def test_loan_request_amount_with_dinars_extracted():
+    fields, _ = extract_draft_fields(
+        "I want to request 3000 dinars for medical expenses and repay over 10 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["amount"] is not None
+    assert "3000" in fields["amount"]
 
 
 # ===========================================================================
@@ -481,7 +538,12 @@ def test_gemini_structured_fields_used_when_present():
 
 
 def test_gemini_loan_structured_fields_used():
-    structured = {"amount": "2000 TND", "reason": "family expenses"}
+    structured = {
+        "amount": "2000 TND",
+        "loanType": "PERSONAL_ADVANCE",
+        "reason": "family expenses",
+        "repaymentMonths": 12,
+    }
     with patch("app.services.drafting_service.settings") as ms, \
          patch("app.services.drafting_service.httpx.Client") as mh:
         _mock_gemini_settings(ms)
@@ -496,7 +558,9 @@ def test_gemini_loan_structured_fields_used():
     assert data["source"] == "external_ai"
     assert data["draftType"] == "LOAN_REQUEST"
     assert data["draftFields"]["amount"] == "2000 TND"
+    assert data["draftFields"]["loanType"] == "PERSONAL_ADVANCE"
     assert data["draftFields"]["reason"] == "family expenses"
+    assert data["draftFields"]["repaymentMonths"] == 12
     assert data["missingFields"] == []
 
 
@@ -945,11 +1009,16 @@ def test_loan_draftfields_keys_present_even_when_missing():
         "LOAN_REQUEST",
     )
     assert "amount" in fields
+    assert "loanType" in fields
     assert "reason" in fields
+    assert "repaymentMonths" in fields
     assert fields["amount"] is None
+    assert fields["loanType"] is None
     assert fields["reason"] is None
     assert "amount" in missing
+    assert "loanType" in missing
     assert "reason" in missing
+    assert "repaymentMonths" in missing
 
 
 # ===========================================================================
@@ -1005,12 +1074,14 @@ def test_extract_leave_full_details_unit():
 
 def test_extract_loan_full_details_unit():
     fields, missing = extract_draft_fields(
-        "Help me request a loan for 2000 TND because of family expenses.",
+        "Help me request a loan of 2000 TND for home renovation over 12 months because of family expenses.",
         "LOAN_REQUEST",
     )
     assert fields["amount"] is not None
     assert "2000" in fields["amount"]
+    assert fields["loanType"] == "HOUSING_ADVANCE"
     assert fields["reason"] is not None
+    assert fields["repaymentMonths"] == 12
     assert missing == []
 
 
@@ -1844,4 +1915,3 @@ def test_leave_request_draft_still_has_template_language():
     assert "review" in draft_lower or "personalise" in draft_lower, (
         "Leave template must still contain review disclaimer"
     )
-
