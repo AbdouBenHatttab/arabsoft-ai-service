@@ -366,6 +366,59 @@ def test_loan_request_amount_with_dinars_extracted():
     assert "3000" in fields["amount"]
 
 
+def test_loan_request_home_renovation_maps_to_housing_advance():
+    fields, missing = extract_draft_fields(
+        "I need a loan of 5000 TND for home renovation over 12 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["loanType"] == "HOUSING_ADVANCE"
+    assert fields["amount"] is not None
+    assert "5000" in fields["amount"]
+    assert fields["repaymentMonths"] == 12
+    assert missing == []
+
+
+def test_loan_request_medical_expenses_maps_to_medical_advance():
+    fields, missing = extract_draft_fields(
+        "I want 3000 dinars for medical expenses and repay over 10 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["loanType"] == "MEDICAL_ADVANCE"
+    assert fields["amount"] is not None
+    assert "3000" in fields["amount"]
+    assert fields["repaymentMonths"] == 10
+    assert missing == []
+
+
+def test_loan_request_university_fees_maps_to_education_loan():
+    fields, missing = extract_draft_fields(
+        "I need a loan for university fees over 12 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["loanType"] == "EDUCATION_LOAN"
+    assert fields["repaymentMonths"] == 12
+    assert "loanType" not in missing
+
+
+def test_loan_request_family_emergency_maps_to_emergency_loan():
+    fields, missing = extract_draft_fields(
+        "I need an emergency loan because of family emergency over 6 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["loanType"] == "EMERGENCY_LOAN"
+    assert fields["repaymentMonths"] == 6
+    assert "loanType" not in missing
+
+
+def test_vague_loan_keeps_loan_type_missing():
+    fields, missing = extract_draft_fields(
+        "I need a loan of 5000 TND over 12 months.",
+        "LOAN_REQUEST",
+    )
+    assert fields["loanType"] is None
+    assert "loanType" in missing
+
+
 # ===========================================================================
 # 7. Loan request without amount
 # ===========================================================================

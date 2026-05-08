@@ -682,10 +682,24 @@ _REPAYMENT_MONTHS_PATTERN = re.compile(
 
 _LOAN_TYPE_KEYWORDS: list[tuple[str, list[str]]] = [
     ("PERSONAL_ADVANCE", ["personal advance", "personal loan", "salary advance", "salary loan"]),
-    ("EMERGENCY_LOAN", ["emergency loan", "family emergency", "urgent emergency", "emergency"]),
-    ("EDUCATION_LOAN", ["education loan", "educational loan", "education fees", "tuition", "study fees"]),
-    ("MEDICAL_ADVANCE", ["medical advance", "medical loan", "medical expenses", "health expenses"]),
-    ("HOUSING_ADVANCE", ["housing advance", "home loan", "housing loan", "home renovation", "home repairs", "house repairs"]),
+    ("EMERGENCY_LOAN", ["emergency loan", "family emergency", "urgent emergency", "urgent", "emergency"]),
+    ("EDUCATION_LOAN", ["education loan", "educational loan", "education fees", "university", "school", "tuition", "study fees"]),
+    ("MEDICAL_ADVANCE", ["medical advance", "medical loan", "medical expense", "medical expenses", "health expenses"]),
+    ("HOUSING_ADVANCE", [
+        "housing advance",
+        "home loan",
+        "housing loan",
+        "housing",
+        "home renovation",
+        "house renovation",
+        "home repair",
+        "house repair",
+        "home repairs",
+        "house repairs",
+        "rent",
+        "house",
+        "apartment",
+    ]),
 ]
 
 
