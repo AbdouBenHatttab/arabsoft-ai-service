@@ -98,6 +98,13 @@ _DRAFT_VERBS: list[str] = [
     "i would like maternity",
     "i would like paternity",
     "i would like to take",
+    "i need permission",
+    "i need to borrow",
+    "i need to take",
+    "i need a short absence",
+    "i need time permission",
+    "i need equipment",
+    "i want to borrow",
     "i need",
     "i want",
     "i will be",
@@ -178,6 +185,39 @@ _DRAFT_SUBJECTS: list[str] = [
     "vacation",
     "away from work",
     "away from the office",
+    # Authorization-specific subjects
+    "time permission",
+    "short absence",
+    "permission tomorrow",
+    "permission on",
+    "leave early",
+    "arrive late",
+    "early departure",
+    "late arrival",
+    "borrow a laptop",
+    "borrow a pc",
+    "borrow a tablet",
+    "borrow a monitor",
+    "borrow a keyboard",
+    "borrow a mouse",
+    "borrow a headset",
+    "borrow equipment",
+    "take a laptop",
+    "take a pc",
+    "take a tablet",
+    "take a monitor",
+    "take equipment",
+    "use a laptop",
+    "use a pc",
+    "use a tablet",
+    "use equipment",
+    "equipment from the office",
+    "equipment from office",
+    "laptop from the office",
+    "laptop home",
+    "pc home",
+    "tablet home",
+    "for remote work",
 ]
 
 
@@ -266,7 +306,8 @@ def _classify_draft_type(question: str) -> str:
       0. IMPROVE_TEXT (leading verb) — checked FIRST.
       0b. IMPROVE_TEXT (letter-writing signal) — "write me a formal letter", etc.
       1. DOCUMENT_REQUEST
-      2. AUTHORIZATION_REQUEST
+      2. AUTHORIZATION_REQUEST — with authorizationType sub-classification
+         Blocked: TRAINING / BUSINESS_TRIP → returns _TYPE_AUTH_BLOCKED
       3. LOAN_REQUEST
       4. IMPROVE_TEXT (anywhere)
       5. LEAVE_REQUEST (default)
@@ -279,16 +320,24 @@ def _classify_draft_type(question: str) -> str:
         return _TYPE_IMPROVE
 
     # 0b. Explicit letter-writing intent wins over document-request classification.
-    # "write me a formal letter requesting a salary certificate" → IMPROVE_TEXT.
-    # This is checked before document signals because the user is asking for
-    # text generation, not a platform submission.
     if any(sig in q for sig in _LETTER_WRITING_SIGNALS):
         return _TYPE_IMPROVE
 
     if any(sig in q for sig in _STRONG_DOCUMENT_SIGNALS):
         return _TYPE_DOC
 
-    if "authorization" in q:
+    if "authorization" in q or "authorisation" in q:
+        # Blocked legacy types must be intercepted first
+        if any(sig in q for sig in _LEGACY_AUTH_BLOCKED_SIGNALS):
+            return _TYPE_AUTH_BLOCKED
+        return _TYPE_AUTH
+
+    # Detect equipment-borrow intent even without the word "authorization"
+    if _detect_equipment_request(q):
+        return _TYPE_AUTH
+
+    # Detect time-permission / short-absence intent even without "authorization"
+    if _detect_time_permission(q):
         return _TYPE_AUTH
 
     if "loan" in q:
@@ -336,6 +385,128 @@ _AUTH_TYPES: list[tuple[str, list[str]]] = [
     ("external", ["external", "outside the office", "off-site"]),
     ("medical", ["medical", "doctor", "hospital", "clinic"]),
 ]
+
+# ---------------------------------------------------------------------------
+# V3.2 AUTHORIZATION_REQUEST structured sub-types
+# ---------------------------------------------------------------------------
+
+# Internal sentinel returned by _classify_draft_type when the user requests
+# a legacy blocked authorization type.  Handled in get_draft_response() before
+# it ever reaches extract_draft_fields or _local_draft.
+_TYPE_AUTH_BLOCKED = "__AUTH_BLOCKED__"
+
+# Active authorization sub-types
+_AUTH_SUBTYPE_TIME_PERMISSION = "TIME_PERMISSION"
+_AUTH_SUBTYPE_EQUIPMENT = "EQUIPMENT_REQUEST"
+
+# Signals that indicate legacy/blocked authorization types.
+# We NEVER produce TRAINING or BUSINESS_TRIP drafts.
+_LEGACY_AUTH_BLOCKED_SIGNALS: list[str] = [
+    "training",
+    "business trip",
+    "business travel",
+    "mission",
+    "formation",
+]
+
+# Equipment keywords for EQUIPMENT_REQUEST sub-type
+_EQUIPMENT_KEYWORDS: list[str] = [
+    "laptop",
+    "pc",
+    "tablet",
+    "monitor",
+    "keyboard",
+    "mouse",
+    "headset",
+    "computer",
+    "screen",
+    "printer",
+    "equipment",
+]
+
+# Intent signals for EQUIPMENT_REQUEST (borrow/take from office to home)
+_EQUIPMENT_BORROW_SIGNALS: list[str] = [
+    "borrow",
+    "take home",
+    "take a",
+    "use at home",
+    "remote work",
+    "work from home",
+    "home office",
+    "from the office",
+    "from office",
+]
+
+# Intent signals for TIME_PERMISSION (short absence / leave early / arrive late)
+_TIME_PERMISSION_SIGNALS: list[str] = [
+    "permission",
+    "short absence",
+    "leave early",
+    "arrive late",
+    "late arrival",
+    "early departure",
+    "doctor appointment",
+    "medical appointment",
+    "time permission",
+    "absence",
+]
+
+
+def _detect_equipment_request(q: str) -> bool:
+    """Return True if question looks like an EQUIPMENT_REQUEST authorization."""
+    has_equipment = any(kw in q for kw in _EQUIPMENT_KEYWORDS)
+    has_borrow_intent = any(sig in q for sig in _EQUIPMENT_BORROW_SIGNALS)
+    return has_equipment and has_borrow_intent
+
+
+def _detect_time_permission(q: str) -> bool:
+    """Return True if question looks like a TIME_PERMISSION authorization."""
+    # Must mention a time signal (leave early / permission / absence / doctor)
+    has_time_signal = any(sig in q for sig in _TIME_PERMISSION_SIGNALS)
+    # AND either a time range or a date reference that makes it absence-shaped
+    has_time_range = bool(_TIME_RANGE_PATTERN.search(q))
+    has_date_ref = any(
+        kw in q for kw in ["tomorrow", "today", "monday", "tuesday", "wednesday",
+                            "thursday", "friday", "morning", "afternoon"]
+    )
+    return has_time_signal and (has_time_range or has_date_ref or "absence" in q
+                                or "short" in q)
+
+
+def _sub_classify_authorization(q: str) -> str:
+    """Return 'TIME_PERMISSION' or 'EQUIPMENT_REQUEST' based on question content."""
+    if _detect_equipment_request(q):
+        return _AUTH_SUBTYPE_EQUIPMENT
+    return _AUTH_SUBTYPE_TIME_PERMISSION
+
+
+_EQUIPMENT_TYPE_MAP: list[tuple[str, list[str]]] = [
+    ("laptop",   ["laptop", "notebook"]),
+    ("PC",       [" pc ", "pc,", "pc.", "desktop", "computer"]),
+    ("tablet",   ["tablet", "ipad"]),
+    ("monitor",  ["monitor", "screen", "display"]),
+    ("keyboard", ["keyboard"]),
+    ("mouse",    ["mouse"]),
+    ("headset",  ["headset", "headphones", "earphones"]),
+    ("printer",  ["printer"]),
+]
+
+
+def _extract_equipment_type(text: str) -> Optional[str]:
+    """Extract the type of equipment from the text."""
+    q = " " + text.lower() + " "
+    for equip_type, keywords in _EQUIPMENT_TYPE_MAP:
+        if any(kw in q for kw in keywords):
+            return equip_type
+    return None
+
+
+def _extract_duration_days(text: str) -> Optional[str]:
+    """Extract a duration like '3 days' from the text."""
+    m = re.search(r"(\d+)\s*days?", text, re.IGNORECASE)
+    if m:
+        return m.group(1) + " days"
+    return None
 
 # ---------------------------------------------------------------------------
 # Date normalization
@@ -746,28 +917,58 @@ def extract_draft_fields(
         return fields, missing
 
     if draft_type == _TYPE_AUTH:
-        dates = _extract_dates(question)
-        date_val = dates[0] if dates else None
-        from_time, to_time = _extract_time_range(question)
-        auth_type = _extract_auth_type(question)
-        reason = _extract_reason(question)
-        fields = {
-            "authorizationType": auth_type,
-            "date": date_val,
-            "fromTime": from_time,
-            "toTime": to_time,
-            "reason": reason,
-        }
-        missing = []
-        if date_val is None:
-            missing.append("date")
-        if from_time is None:
-            missing.append("fromTime")
-        if to_time is None:
-            missing.append("toTime")
-        if reason is None:
-            missing.append("reason")
-        return fields, missing
+        q_low = question.lower()
+        auth_sub_type = _sub_classify_authorization(q_low)
+
+        if auth_sub_type == _AUTH_SUBTYPE_EQUIPMENT:
+            # EQUIPMENT_REQUEST fields
+            equipment_type = _extract_equipment_type(question)
+            start_date, end_date = _extract_leave_date_range(question)
+            # Also look for duration like "for 3 days"
+            duration = _extract_duration_days(question) if not start_date and not end_date else None
+            reason = _extract_reason(question)
+            fields = {
+                "authorizationType": _AUTH_SUBTYPE_EQUIPMENT,
+                "equipmentType": equipment_type,
+                "startDate": start_date,
+                "endDate": end_date,
+                "duration": duration,
+                "reason": reason,
+            }
+            missing: list[str] = []
+            if equipment_type is None:
+                missing.append("equipmentType")
+            if start_date is None and duration is None:
+                missing.append("startDate")
+            return fields, missing
+
+        else:
+            # TIME_PERMISSION fields
+            # Date: look for a single absence date
+            raw_dates = _extract_dates(question)
+            absence_date: Optional[str] = None
+            if raw_dates:
+                absence_date = normalize_date_to_iso(raw_dates[0])
+                if absence_date is None:
+                    # keep raw token if normalize failed (e.g. "tomorrow", day name)
+                    absence_date = raw_dates[0]
+            from_time, to_time = _extract_time_range(question)
+            reason = _extract_reason(question)
+            fields = {
+                "authorizationType": _AUTH_SUBTYPE_TIME_PERMISSION,
+                "absenceDate": absence_date,
+                "fromTime": from_time,
+                "toTime": to_time,
+                "reason": reason,
+            }
+            missing = []
+            if absence_date is None:
+                missing.append("absenceDate")
+            if from_time is None:
+                missing.append("fromTime")
+            if to_time is None:
+                missing.append("toTime")
+            return fields, missing
 
     if draft_type == _TYPE_DOC:
         doc_type = _extract_document_type(question)
@@ -992,6 +1193,67 @@ def _local_draft(question: str, draft_type: str) -> ChatResponse:
             warnings=[],
             source="local_rules",
             draftType=_TYPE_DOC,
+            draftFields=draft_fields,
+            missingFields=missing_fields,
+        )
+
+    if draft_type == _TYPE_AUTH:
+        # AUTHORIZATION_REQUEST: return both a human-readable draft text AND draftFields.
+        # The draft text lets tests (and users) see non-empty authorization content,
+        # while draftFields lets React render AuthorizationDraftPreview.
+        draft_fields, missing_fields = extract_draft_fields(question, draft_type)
+        auth_sub = (draft_fields or {}).get("authorizationType", _AUTH_SUBTYPE_TIME_PERMISSION)
+
+        if auth_sub == _AUTH_SUBTYPE_EQUIPMENT:
+            equipment_type = (draft_fields or {}).get("equipmentType") or "[equipment type]"
+            start_date = (draft_fields or {}).get("startDate") or "[start date]"
+            end_date = (draft_fields or {}).get("endDate") or "[end date]"
+            reason = (draft_fields or {}).get("reason") or "[reason for use at home]"
+            draft_text = (
+                f"Subject: Equipment Borrowing Authorization Request — [Your Name]\n\n"
+                f"Dear [Manager / HR Team],\n\n"
+                f"I am writing to request authorization to borrow a {equipment_type} "
+                f"from the office for use at home.\n\n"
+                f"Period: {start_date} to {end_date}\n"
+                f"Reason: {reason}\n\n"
+                f"I will ensure the equipment is returned in good condition at the end of the agreed period. "
+                f"Please let me know if any additional information or approval is required.\n\n"
+                f"Thank you.\n\n"
+                f"Regards,\n[Your Name]"
+            ) + _REVIEW_DISCLAIMER
+            answer = (
+                "I prepared an equipment borrowing authorization request. "
+                "Please review the details before submitting."
+            )
+        else:
+            absence_date = (draft_fields or {}).get("absenceDate") or "[date]"
+            from_time = (draft_fields or {}).get("fromTime") or "[from time]"
+            to_time = (draft_fields or {}).get("toTime") or "[to time]"
+            reason = (draft_fields or {}).get("reason") or "[reason]"
+            draft_text = (
+                f"Subject: Time Permission / Short Absence Authorization Request — [Your Name]\n\n"
+                f"Dear [Manager / HR Team],\n\n"
+                f"I am writing to request authorization for a short absence on {absence_date} "
+                f"from {from_time} to {to_time}.\n\n"
+                f"Reason: {reason}\n\n"
+                f"I will ensure my responsibilities are covered during this time and I am available "
+                f"to discuss any arrangements needed.\n\n"
+                f"Thank you.\n\n"
+                f"Regards,\n[Your Name]"
+            ) + _REVIEW_DISCLAIMER
+            answer = (
+                "I prepared a time permission authorization request. "
+                "Please review the details before submitting."
+            )
+
+        return ChatResponse(
+            answer=answer,
+            draft=draft_text,
+            warnings=[
+                "This is a locally generated template. Review all details before submitting."
+            ],
+            source="local_rules",
+            draftType=_TYPE_AUTH,
             draftFields=draft_fields,
             missingFields=missing_fields,
         )
@@ -1294,7 +1556,11 @@ def _expected_keys_for_type(draft_type: str) -> list[str]:
     _EXPECTED: dict[str, list[str]] = {
         _TYPE_LEAVE: ["leaveType", "startDate", "endDate", "reason"],
         _TYPE_LOAN: ["amount", "reason"],
-        _TYPE_AUTH: ["authorizationType", "date", "fromTime", "toTime", "reason"],
+        # AUTHORIZATION_REQUEST: return the TIME_PERMISSION shape as default;
+        # actual shape depends on authorizationType extracted from the question.
+        # The Gemini structured-fields merge path calls extract_draft_fields
+        # as fallback anyway when Gemini's output is unusable.
+        _TYPE_AUTH: ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"],
         # DOCUMENT_REQUEST: only documentType is required by Spring Boot DTO;
         # notes is optional and maps to CreateDocumentRequestDto.notes.
         _TYPE_DOC: ["documentType", "notes"],
@@ -1312,6 +1578,27 @@ def get_draft_response(request: ChatRequest) -> Optional[ChatResponse]:
 
     draft_type = _classify_draft_type(request.question)
     logger.debug("Drafting intent detected. draftType=%s", draft_type)
+
+    # Blocked legacy types: TRAINING, BUSINESS_TRIP, MISSION
+    # Return a safe assistant message; do NOT create any draft.
+    if draft_type == _TYPE_AUTH_BLOCKED:
+        return ChatResponse(
+            answer=(
+                "I\'m sorry, but authorization drafting through the assistant only supports "
+                "two types of requests:\n"
+                "• Short absence / time permission (e.g. leaving early, arriving late, "
+                "doctor appointment)\n"
+                "• Equipment borrowing from the office (e.g. borrowing a laptop, tablet, "
+                "or monitor for remote work)\n\n"
+                "Requests for training authorizations or business trips are not available "
+                "through the assistant. Please contact HR or your Team Leader directly "
+                "for those."
+            ),
+            source="local_rules",
+            draftType=None,
+            draftFields=None,
+            missingFields=[],
+        )
 
     gemini_result = _call_gemini_for_draft(request.question, draft_type)
     if gemini_result is not None:

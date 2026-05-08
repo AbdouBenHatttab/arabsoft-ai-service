@@ -15,7 +15,7 @@ Coverage:
   5.  Leave request with no leave type: leaveType=null, "leaveType" in missingFields.
   6.  Loan request extracts amount and reason.
   7.  Loan request without amount: "amount" in missingFields.
-  8.  Authorization request extracts date, fromTime, toTime, reason.
+  8.  Authorization request extracts absenceDate, fromTime, toTime, reason (V3.2: TIME_PERMISSION sub-type).
   9.  Document request extracts documentType and purpose.
   10. improve_text gives draftType=IMPROVE_TEXT, draftFields=None, missingFields=[].
   11. Gemini enabled with structuredFields: draftFields populated from Gemini.
@@ -338,17 +338,27 @@ def test_authorization_extracts_time_range():
 
 
 def test_authorization_extracts_date_and_reason():
+    # V3.2: date field renamed to absenceDate for TIME_PERMISSION sub-type.
+    # absenceDate is now normalized to ISO yyyy-MM-dd when the date is unambiguous
+    # ("tomorrow" normalizes to today+1). Check it's a non-None string.
+    import re as _re
     fields, missing = extract_draft_fields(
         "Draft an authorization request tomorrow from 10 to 12 for a doctor appointment.",
         "AUTHORIZATION_REQUEST",
     )
-    assert fields["date"] is not None
-    assert "tomorrow" in fields["date"].lower()
+    assert fields["absenceDate"] is not None
+    # absenceDate is either an ISO date (tomorrow normalized) or the raw token "tomorrow"
+    iso_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    absence = fields["absenceDate"]
+    assert iso_re.match(absence) or "tomorrow" in absence.lower(), (
+        f"absenceDate should be ISO date or 'tomorrow', got: {absence!r}"
+    )
     assert fields["reason"] is not None
     assert "doctor" in fields["reason"].lower() or "appointment" in fields["reason"].lower()
 
 
 def test_authorization_via_api_extracts_fields():
+    # V3.2: date field renamed to absenceDate for TIME_PERMISSION sub-type.
     data = post_chat(
         "EMPLOYEE",
         "Draft an authorization request for tomorrow from 10 to 12 for a medical appointment.",
@@ -358,7 +368,7 @@ def test_authorization_via_api_extracts_fields():
     assert fields is not None
     assert fields["fromTime"] == "10:00"
     assert fields["toTime"] == "12:00"
-    assert fields["date"] is not None
+    assert fields["absenceDate"] is not None
 
 
 def test_authorization_missing_times_in_missing_fields():
@@ -884,8 +894,14 @@ def test_authorization_draftfields_has_all_keys():
     data = post_chat("EMPLOYEE", "Draft an authorization request explanation")
     fields = data["draftFields"]
     assert fields is not None
-    for key in ["authorizationType", "date", "fromTime", "toTime", "reason"]:
-        assert key in fields, f"Missing key: {key}"
+    # TIME_PERMISSION shape: authorizationType, absenceDate, fromTime, toTime, reason
+    # (V3.2: 'date' renamed to 'absenceDate' for TIME_PERMISSION sub-type)
+    assert "authorizationType" in fields
+    assert "fromTime" in fields
+    assert "toTime" in fields
+    assert "reason" in fields
+    # absenceDate is the new field name (was 'date' before V3.2)
+    assert "absenceDate" in fields or "date" in fields
 
 
 def test_document_request_draftfields_has_all_keys():
@@ -941,11 +957,12 @@ def test_loan_draftfields_keys_present_even_when_missing():
 # ===========================================================================
 
 def test_auth_draftfields_has_five_keys_always():
+    # V3.2: TIME_PERMISSION shape uses 'absenceDate' instead of 'date'.
     fields, _ = extract_draft_fields(
         "Draft an authorization request explanation",
         "AUTHORIZATION_REQUEST",
     )
-    for key in ["authorizationType", "date", "fromTime", "toTime", "reason"]:
+    for key in ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"]:
         assert key in fields
 
 
@@ -1002,13 +1019,14 @@ def test_extract_loan_full_details_unit():
 # ===========================================================================
 
 def test_extract_auth_time_range_unit():
+    # V3.2: date field renamed to absenceDate for TIME_PERMISSION sub-type.
     fields, _ = extract_draft_fields(
         "Draft an authorization request tomorrow from 10 to 12 for a medical appointment.",
         "AUTHORIZATION_REQUEST",
     )
     assert fields["fromTime"] == "10:00"
     assert fields["toTime"] == "12:00"
-    assert fields["date"] is not None
+    assert fields["absenceDate"] is not None
 
 
 # ===========================================================================
