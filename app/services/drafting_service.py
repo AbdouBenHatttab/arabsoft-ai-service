@@ -1318,7 +1318,7 @@ For IMPROVE_TEXT: produce ONLY a polished rewrite of the text the user provided.
 structuredFields schema by draftType:
   LEAVE_REQUEST:    { "leaveType": null, "startDate": null, "endDate": null, "reason": null }
   LOAN_REQUEST:     { "amount": null, "reason": null }
-  AUTHORIZATION_REQUEST: { "authorizationType": null, "date": null, "fromTime": null, "toTime": null, "reason": null }
+  AUTHORIZATION_REQUEST: { "authorizationType": null, "absenceDate": null, "fromTime": null, "toTime": null, "reason": null }
   DOCUMENT_REQUEST: { "documentType": null, "purpose": null, "extraDetails": null }
   For DOCUMENT_REQUEST, documentType MUST be one of these exact enum values (uppercase, underscored):
     SALARY_CERTIFICATE | EMPLOYMENT_CERTIFICATE | EXPERIENCE_CERTIFICATE |
@@ -1328,6 +1328,7 @@ structuredFields schema by draftType:
   IMPROVE_TEXT:     structuredFields must be null.
 
 Dates for LEAVE_REQUEST: normalize to ISO yyyy-MM-dd.
+For AUTHORIZATION_REQUEST absenceDate: normalize relative dates (tomorrow, today) to ISO yyyy-MM-dd.
 Times: normalize to HH:MM when safely possible.
 Amounts: include currency if stated.
 
@@ -1373,6 +1374,19 @@ def _build_drafting_user_message(question: str, draft_type: str) -> str:
             "Do NOT write a formal letter. Do NOT include 'Dear HR Team', '[Your Name]', or any letter body. "
             "Set draft to null or an empty string. "
             "Your ONLY task is to extract structuredFields: documentType (exact enum) and notes (purpose if stated). "
+            "For structuredFields, extract only what the user explicitly stated; use null for the rest."
+        )
+    if draft_type == _TYPE_AUTH:
+        return (
+            f"Draft type: {draft_type}\n"
+            f"User request: {question}\n\n"
+            "Write a professional authorization request draft following the rules above. "
+            "For structuredFields.authorizationType: set to 'TIME_PERMISSION' for time/absence requests "
+            "(doctor appointment, leave early, arrive late, short absence), or 'EQUIPMENT_REQUEST' for "
+            "equipment borrowing requests. "
+            "For structuredFields.absenceDate: normalize relative dates like 'tomorrow' or 'today' to "
+            "ISO yyyy-MM-dd format. "
+            "Use placeholders like [date], [reason] wherever specific details are missing. "
             "For structuredFields, extract only what the user explicitly stated; use null for the rest."
         )
     return (
@@ -1496,8 +1510,13 @@ def _resolve_structured_fields(
     """
     Determine the final draftFields and missingFields.
 
-    Safety guard for LEAVE_REQUEST: leaveType returned by Gemini is accepted ONLY
-    when the question contains an explicit keyword for that type.
+    For LEAVE_REQUEST: leaveType returned by Gemini is accepted ONLY when the
+    question contains an explicit keyword for that type (safety guard).
+
+    For AUTHORIZATION_REQUEST: if Gemini returns null authorizationType or null
+    absenceDate, those fields are repaired using the local extractor so that
+    TIME_PERMISSION and absenceDate are never left null when present in the
+    original user text.
     """
     if draft_type == _TYPE_IMPROVE:
         return None, []
@@ -1524,6 +1543,13 @@ def _resolve_structured_fields(
                 if "leaveType" not in missing:
                     missing.append("leaveType")
 
+        # --- V3.2 FIX: Repair null AUTHORIZATION_REQUEST fields from local extractor ---
+        # Gemini sometimes returns authorizationType=null (using old "date" key instead
+        # of "absenceDate", or weak inference). Merge missing fields from local extraction
+        # so TIME_PERMISSION and absenceDate are never null when present in the original text.
+        if draft_type == _TYPE_AUTH:
+            fields, missing = _repair_auth_fields_from_local(question, fields, missing)
+
         return fields, missing
 
     logger.debug(
@@ -1531,6 +1557,75 @@ def _resolve_structured_fields(
         draft_type,
     )
     return extract_draft_fields(question, draft_type)
+
+
+def _repair_auth_fields_from_local(
+    question: str,
+    gemini_fields: dict,
+    gemini_missing: list[str],
+) -> tuple[dict, list[str]]:
+    """
+    For AUTHORIZATION_REQUEST: if Gemini left authorizationType or absenceDate null,
+    run the local extractor against the original user text and fill in those gaps.
+
+    Rules:
+    - Only fills null fields — never overwrites non-null values Gemini returned.
+    - Repairs: authorizationType, absenceDate, fromTime, toTime, reason.
+    - If Gemini returned a partial EQUIPMENT_REQUEST shape, local extractor resolves it.
+    - Recomputes missingFields list after repair.
+    """
+    # If authorizationType is already set and absenceDate is set, nothing to repair
+    if (
+        gemini_fields.get("authorizationType") is not None
+        and gemini_fields.get("absenceDate") is not None
+    ):
+        return gemini_fields, gemini_missing
+
+    # Run local extractor on the original question
+    local_fields, _ = extract_draft_fields(question, _TYPE_AUTH)
+    if local_fields is None:
+        return gemini_fields, gemini_missing
+
+    repaired = dict(gemini_fields)
+
+    # Determine which key set to use based on the resolved authorizationType
+    local_auth_type = local_fields.get("authorizationType")
+
+    # Repair authorizationType first
+    if repaired.get("authorizationType") is None and local_auth_type is not None:
+        repaired["authorizationType"] = local_auth_type
+
+    resolved_auth_type = repaired.get("authorizationType", _AUTH_SUBTYPE_TIME_PERMISSION)
+
+    if resolved_auth_type == _AUTH_SUBTYPE_EQUIPMENT:
+        # Repair EQUIPMENT_REQUEST-specific fields
+        for key in ("equipmentType", "startDate", "endDate", "duration", "reason"):
+            if repaired.get(key) is None and local_fields.get(key) is not None:
+                repaired[key] = local_fields[key]
+        # Remove TIME_PERMISSION-only keys that don't belong in EQUIPMENT_REQUEST
+        for tp_key in ("absenceDate", "fromTime", "toTime"):
+            repaired.pop(tp_key, None)
+    else:
+        # TIME_PERMISSION — repair absenceDate, fromTime, toTime, reason
+        for key in ("absenceDate", "fromTime", "toTime", "reason"):
+            if repaired.get(key) is None and local_fields.get(key) is not None:
+                repaired[key] = local_fields[key]
+
+    # Recompute missingFields for the repaired shape
+    missing: list[str] = []
+    if resolved_auth_type == _AUTH_SUBTYPE_EQUIPMENT:
+        check_keys = ["authorizationType", "equipmentType", "startDate"]
+        if repaired.get("equipmentType") is None:
+            missing.append("equipmentType")
+        if repaired.get("startDate") is None and repaired.get("duration") is None:
+            missing.append("startDate")
+    else:
+        check_keys = ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"]
+        for key in check_keys:
+            if repaired.get(key) is None:
+                missing.append(key)
+
+    return repaired, missing
 
 
 # ---------------------------------------------------------------------------
@@ -1556,10 +1651,8 @@ def _expected_keys_for_type(draft_type: str) -> list[str]:
     _EXPECTED: dict[str, list[str]] = {
         _TYPE_LEAVE: ["leaveType", "startDate", "endDate", "reason"],
         _TYPE_LOAN: ["amount", "reason"],
-        # AUTHORIZATION_REQUEST: return the TIME_PERMISSION shape as default;
-        # actual shape depends on authorizationType extracted from the question.
-        # The Gemini structured-fields merge path calls extract_draft_fields
-        # as fallback anyway when Gemini's output is unusable.
+        # AUTHORIZATION_REQUEST: TIME_PERMISSION shape as default.
+        # _repair_auth_fields_from_local handles shape switching for EQUIPMENT_REQUEST.
         _TYPE_AUTH: ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"],
         # DOCUMENT_REQUEST: only documentType is required by Spring Boot DTO;
         # notes is optional and maps to CreateDocumentRequestDto.notes.

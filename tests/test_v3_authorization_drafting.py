@@ -39,9 +39,20 @@ Regression:
   23. Existing DOCUMENT_REQUEST tests still pass (spot-check)
   24. Refusal still fires before drafting
   25. Improve-text still works
+
+Gemini repair path (V3.2 fix):
+  26. Local path — doctor appointment: TIME_PERMISSION, ISO absenceDate, both times, reason
+  27. Gemini returns AUTHORIZATION_REQUEST with authorizationType=null, absenceDate=null
+      but fromTime/toTime/reason present → FastAPI repairs to TIME_PERMISSION + ISO absenceDate
+  28. Gemini returns a generic auth draft with weak draftFields (all nulls) →
+      FastAPI repairs all fields from local extractor
+  29. Training blocked even after Gemini-repair path
+  30. Business trip blocked even after Gemini-repair path
 """
 
+import json
 import pytest
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -50,6 +61,7 @@ from app.services.drafting_service import (
     _detect_time_permission,
     _detect_equipment_request,
     _sub_classify_authorization,
+    _repair_auth_fields_from_local,
     _AUTH_SUBTYPE_TIME_PERMISSION,
     _AUTH_SUBTYPE_EQUIPMENT,
 )
@@ -62,6 +74,29 @@ def post_chat(role: str, question: str) -> dict:
         "/assistant/chat",
         json={"role": role, "question": question, "context": {}},
     ).json()
+
+
+def _mock_gemini_settings(mock_settings):
+    mock_settings.gemini_enabled = True
+    mock_settings.gemini_api_key = "test-key"
+    mock_settings.gemini_model = "gemini-2.5-flash"
+    mock_settings.gemini_timeout_seconds = 10
+
+
+def _mock_gemini_auth_response(mock_http, *, draft_text: str, structured_fields: dict):
+    """Helper: mock Gemini returning an AUTHORIZATION_REQUEST structured response."""
+    payload = json.dumps({
+        "answer": "Here is your authorization request draft.",
+        "draft": draft_text,
+        "disclaimer": "Please review before submitting.",
+        "structuredFields": structured_fields,
+    })
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": payload}]}}]
+    }
+    mock_resp.raise_for_status = MagicMock()
+    mock_http.return_value.__enter__.return_value.post.return_value = mock_resp
 
 
 # ===========================================================================
@@ -534,3 +569,241 @@ def test_api_equipment_request_related_pages_empty():
         "I need to borrow a laptop from the office for 3 days",
     )
     assert data["relatedPages"] == []
+
+
+# ===========================================================================
+# V3.2 FIX: Gemini repair path tests
+# ===========================================================================
+
+def test_local_path_doctor_appointment_full_fields():
+    """
+    Local path (Gemini disabled by conftest):
+    'I need permission tomorrow from 10 to 11 for a doctor appointment'
+    Must produce TIME_PERMISSION, ISO absenceDate, both times present, reason extracted.
+    authorizationType and absenceDate must NOT be in missingFields.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "I need permission tomorrow from 10 to 11 for a doctor appointment",
+    )
+    import re as _re
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    assert data["source"] == "local_rules"
+    fields = data["draftFields"]
+    assert fields is not None
+    assert fields["authorizationType"] == "TIME_PERMISSION"
+    # absenceDate must be a valid ISO date (tomorrow = today+1)
+    assert fields["absenceDate"] is not None
+    iso_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(fields["absenceDate"]), (
+        f"absenceDate must be ISO yyyy-MM-dd, got: {fields['absenceDate']!r}"
+    )
+    assert fields["fromTime"] == "10:00"
+    assert fields["toTime"] == "11:00"
+    assert fields["reason"] is not None
+    reason_lower = fields["reason"].lower()
+    assert "doctor" in reason_lower or "appointment" in reason_lower
+    # Neither authorizationType nor absenceDate should be in missingFields
+    assert "authorizationType" not in data["missingFields"], (
+        f"authorizationType must not be missing, missingFields={data['missingFields']}"
+    )
+    assert "absenceDate" not in data["missingFields"], (
+        f"absenceDate must not be missing, missingFields={data['missingFields']}"
+    )
+    assert "fromTime" not in data["missingFields"]
+    assert "toTime" not in data["missingFields"]
+
+
+def test_gemini_returns_null_auth_type_and_date_repaired():
+    """
+    Gemini path: Gemini returns AUTHORIZATION_REQUEST with authorizationType=null
+    and absenceDate=null but fromTime='10:00', toTime='11:00', reason present.
+    FastAPI must repair authorizationType to TIME_PERMISSION and absenceDate to
+    a normalized ISO date using the local extractor.
+    Neither authorizationType nor absenceDate should be in missingFields.
+    """
+    import re as _re
+    question = "I need permission tomorrow from 10 to 11 for a doctor appointment"
+
+    # Simulate the weak Gemini response: partial fields, null authorizationType and absenceDate
+    weak_structured = {
+        "authorizationType": None,
+        "absenceDate": None,
+        "fromTime": "10:00",
+        "toTime": "11:00",
+        "reason": "doctor appointment",
+    }
+
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_auth_response(
+            mh,
+            draft_text="Subject: Authorization Request\n\nDear Manager, I request absence on [date] from 10:00 to 11:00 for a doctor appointment.",
+            structured_fields=weak_structured,
+        )
+        data = post_chat("EMPLOYEE", question)
+
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    assert data["source"] == "external_ai"
+    fields = data["draftFields"]
+    assert fields is not None
+    # authorizationType must be repaired to TIME_PERMISSION
+    assert fields["authorizationType"] == "TIME_PERMISSION", (
+        f"authorizationType must be repaired to TIME_PERMISSION, got: {fields['authorizationType']!r}"
+    )
+    # absenceDate must be repaired to a normalized ISO date
+    assert fields["absenceDate"] is not None, "absenceDate must be repaired from local extractor"
+    iso_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(fields["absenceDate"]), (
+        f"absenceDate must be ISO yyyy-MM-dd after repair, got: {fields['absenceDate']!r}"
+    )
+    # fromTime and toTime must be preserved from Gemini
+    assert fields["fromTime"] == "10:00"
+    assert fields["toTime"] == "11:00"
+    # Neither authorizationType nor absenceDate should be in missingFields
+    assert "authorizationType" not in data["missingFields"], (
+        f"authorizationType must not be in missingFields after repair, got: {data['missingFields']}"
+    )
+    assert "absenceDate" not in data["missingFields"], (
+        f"absenceDate must not be in missingFields after repair, got: {data['missingFields']}"
+    )
+
+
+def test_gemini_returns_all_null_auth_fields_repaired():
+    """
+    Gemini returns AUTHORIZATION_REQUEST with all structuredFields null
+    (generic letter draft with placeholders, weak field extraction).
+    FastAPI must repair ALL fields from local extractor.
+    """
+    import re as _re
+    question = "I need permission tomorrow from 10 to 11 for a doctor appointment"
+
+    all_null_structured = {
+        "authorizationType": None,
+        "absenceDate": None,
+        "fromTime": None,
+        "toTime": None,
+        "reason": None,
+    }
+
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_auth_response(
+            mh,
+            draft_text="Subject: Authorization Request\n\nDear Manager, I am writing to request authorization for an absence on [date] from [from time] to [to time] for [reason].",
+            structured_fields=all_null_structured,
+        )
+        data = post_chat("EMPLOYEE", question)
+
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    fields = data["draftFields"]
+    assert fields is not None
+    assert fields["authorizationType"] == "TIME_PERMISSION"
+    assert fields["absenceDate"] is not None
+    iso_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(fields["absenceDate"]), (
+        f"absenceDate must be ISO yyyy-MM-dd after full repair, got: {fields['absenceDate']!r}"
+    )
+    assert fields["fromTime"] == "10:00"
+    assert fields["toTime"] == "11:00"
+    assert "authorizationType" not in data["missingFields"]
+    assert "absenceDate" not in data["missingFields"]
+    assert "fromTime" not in data["missingFields"]
+    assert "toTime" not in data["missingFields"]
+
+
+def test_repair_auth_fields_unit_null_auth_type_and_date():
+    """
+    Unit test for _repair_auth_fields_from_local:
+    Given gemini_fields with authorizationType=null and absenceDate=null but
+    fromTime and toTime present, repair must fill TIME_PERMISSION and ISO absenceDate.
+    """
+    import re as _re
+    from datetime import date, timedelta
+
+    question = "I need permission tomorrow from 10 to 11 for a doctor appointment"
+    gemini_fields = {
+        "authorizationType": None,
+        "absenceDate": None,
+        "fromTime": "10:00",
+        "toTime": "11:00",
+        "reason": "doctor appointment",
+    }
+    gemini_missing = ["authorizationType", "absenceDate"]
+
+    repaired, missing = _repair_auth_fields_from_local(question, gemini_fields, gemini_missing)
+
+    assert repaired["authorizationType"] == "TIME_PERMISSION"
+    assert repaired["absenceDate"] is not None
+    iso_re = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert iso_re.match(repaired["absenceDate"]), (
+        f"absenceDate must be ISO after repair, got: {repaired['absenceDate']!r}"
+    )
+    # Should be tomorrow
+    expected = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    assert repaired["absenceDate"] == expected
+    assert "authorizationType" not in missing
+    assert "absenceDate" not in missing
+    # fromTime and toTime already present — must not be in missing
+    assert "fromTime" not in missing
+    assert "toTime" not in missing
+
+
+def test_repair_auth_fields_unit_preserves_gemini_values():
+    """
+    _repair_auth_fields_from_local must NOT overwrite non-null values
+    Gemini already returned correctly.
+    """
+    from datetime import date, timedelta
+
+    question = "I need permission tomorrow from 10 to 11 for a doctor appointment"
+    tomorrow = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    gemini_fields = {
+        "authorizationType": "TIME_PERMISSION",  # already correct
+        "absenceDate": tomorrow,                  # already correct
+        "fromTime": "10:00",
+        "toTime": "11:00",
+        "reason": "doctor appointment",
+    }
+    gemini_missing = []
+
+    repaired, missing = _repair_auth_fields_from_local(question, gemini_fields, gemini_missing)
+
+    # Nothing should change — all fields already non-null
+    assert repaired["authorizationType"] == "TIME_PERMISSION"
+    assert repaired["absenceDate"] == tomorrow
+    assert repaired["fromTime"] == "10:00"
+    assert repaired["toTime"] == "11:00"
+    assert missing == []
+
+
+def test_training_still_blocked_on_gemini_path():
+    """
+    Training authorization must remain blocked even when Gemini is enabled.
+    The block happens before Gemini is called.
+    """
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        # Gemini should never be called for a blocked type
+        mh.return_value.__enter__.return_value.post.side_effect = Exception("Should not call Gemini")
+        data = post_chat("EMPLOYEE", "I need training authorization")
+
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
+
+
+def test_business_trip_still_blocked_on_gemini_path():
+    """
+    Business trip authorization must remain blocked even when Gemini is enabled.
+    """
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        mh.return_value.__enter__.return_value.post.side_effect = Exception("Should not call Gemini")
+        data = post_chat("EMPLOYEE", "I need a business trip authorization")
+
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
