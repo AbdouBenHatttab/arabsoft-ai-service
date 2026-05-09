@@ -316,6 +316,93 @@ def test_equipment_request_reason_extracted():
     assert "remote" in (fields["reason"] or "").lower()
 
 
+def test_equipment_request_gemini_invalid_reason_is_cleared():
+    """
+    Gemini must not keep action phrases like 'borrow a laptop' as reason.
+    """
+    structured = {
+        "authorizationType": "EQUIPMENT_REQUEST",
+        "equipmentType": "laptop",
+        "duration": "3 days",
+        "reason": "borrow a laptop",
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_auth_response(
+            mh,
+            draft_text="Subject: Authorization Request",
+            structured_fields=structured,
+        )
+        data = post_chat("EMPLOYEE", "I need to borrow a laptop from the office for 3 days")
+
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    assert data["draftFields"]["authorizationType"] == "EQUIPMENT_REQUEST"
+    assert data["draftFields"]["equipmentType"] == "laptop"
+    assert data["draftFields"]["duration"] == "3 days"
+    assert data["draftFields"]["reason"] is None
+    assert "reason" in data["missingFields"]
+
+
+def test_equipment_request_gemini_valid_reason_is_preserved():
+    """
+    Gemini should keep a real motive like 'remote work'.
+    """
+    structured = {
+        "authorizationType": "EQUIPMENT_REQUEST",
+        "equipmentType": "laptop",
+        "duration": "3 days",
+        "reason": "remote work",
+    }
+    with patch("app.services.drafting_service.settings") as ms, \
+         patch("app.services.drafting_service.httpx.Client") as mh:
+        _mock_gemini_settings(ms)
+        _mock_gemini_auth_response(
+            mh,
+            draft_text="Subject: Authorization Request",
+            structured_fields=structured,
+        )
+        data = post_chat("EMPLOYEE", "I need to borrow a laptop from the office for 3 days")
+
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    assert data["draftFields"]["authorizationType"] == "EQUIPMENT_REQUEST"
+    assert data["draftFields"]["equipmentType"] == "laptop"
+    assert data["draftFields"]["duration"] == "3 days"
+    assert data["draftFields"]["reason"] == "remote work"
+    assert "reason" not in data["missingFields"]
+
+
+def test_equipment_request_duration_only_keeps_reason_missing():
+    """
+    Duration-only equipment requests must not reuse the duration as reason.
+    """
+    fields, missing = extract_draft_fields(
+        "I need to borrow a laptop from the office for 3 days",
+        "AUTHORIZATION_REQUEST",
+    )
+    assert fields["authorizationType"] == "EQUIPMENT_REQUEST"
+    assert fields["equipmentType"] == "laptop"
+    assert fields["duration"] == "3 days"
+    assert fields["reason"] is None
+    assert "reason" in missing
+
+
+def test_equipment_request_duration_and_real_reason_extracts_reason():
+    """
+    A real reason after the duration must still be extracted.
+    """
+    fields, missing = extract_draft_fields(
+        "I need to borrow a laptop from the office for 3 days for remote work",
+        "AUTHORIZATION_REQUEST",
+    )
+    assert fields["authorizationType"] == "EQUIPMENT_REQUEST"
+    assert fields["equipmentType"] == "laptop"
+    assert fields["duration"] == "3 days"
+    assert fields["reason"] is not None
+    assert "remote" in (fields["reason"] or "").lower()
+    assert "reason" not in missing
+
+
 # ===========================================================================
 # EQUIPMENT_REQUEST — API path
 # ===========================================================================

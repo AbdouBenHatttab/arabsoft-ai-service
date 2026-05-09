@@ -508,6 +508,101 @@ def _extract_duration_days(text: str) -> Optional[str]:
         return m.group(1) + " days"
     return None
 
+
+def _extract_equipment_reason(text: str) -> Optional[str]:
+    """
+    Extract a real equipment-use reason without reusing duration phrases.
+
+    Equipment requests often contain a duration clause like "for 3 days" that is
+    not a reason. Prefer explicit causal clauses and skip duration-only "for"
+    fragments.
+    """
+    q = text.strip()
+
+    explicit_reason_patterns = [
+        re.compile(
+            r"(?:because|due to|since|as)\s+(.+?)(?:[.!?]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\bfor\s+(.+?)(?=(?:\s+\b(?:because|due to|since|as|for)\b|[.!?;]|$))",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in explicit_reason_patterns:
+        for match in pattern.finditer(q):
+            reason = match.group(1).strip().rstrip(".!?;")
+            if not reason:
+                continue
+            if re.fullmatch(r"\d+\s+days?", reason, re.IGNORECASE):
+                continue
+            if re.fullmatch(r"\d+\s+days?\s+for\s+.+", reason, re.IGNORECASE):
+                reason = re.sub(r"^\d+\s+days?\s+", "", reason, flags=re.IGNORECASE).strip()
+            if reason:
+                return reason
+
+    return None
+
+
+_EQUIPMENT_REASON_PREFIX_RE = re.compile(
+    r"^(?:for|because|due to|since|as)\s+",
+    re.IGNORECASE,
+)
+
+def _sanitize_equipment_reason(text: str, raw_reason: Optional[str]) -> Optional[str]:
+    """
+    Clean up EQUIPMENT_REQUEST reasons.
+
+    Action phrases like "borrow a laptop" are not valid reasons. If the current
+    reason looks invalid, fall back to extracting a real reason from the
+    original question. Duration-only fragments such as "3 days" are also
+    cleared.
+    """
+    if raw_reason is None:
+        candidate = None
+    else:
+        candidate = _EQUIPMENT_REASON_PREFIX_RE.sub("", str(raw_reason).strip())
+        candidate = candidate.strip().rstrip(".!?;")
+
+    if candidate:
+        candidate_lower = candidate.lower()
+        if not re.fullmatch(r"\d+\s+days?", candidate_lower, re.IGNORECASE) and not _is_invalid_equipment_reason(candidate_lower):
+            return candidate
+
+    extracted = _extract_equipment_reason(text)
+    if extracted:
+        extracted = _EQUIPMENT_REASON_PREFIX_RE.sub("", extracted).strip().rstrip(".!?;")
+        if extracted and not re.fullmatch(r"\d+\s+days?", extracted, re.IGNORECASE) and not _is_invalid_equipment_reason(extracted.lower()):
+            return extracted
+
+    return None
+
+
+def _is_invalid_equipment_reason(reason: str) -> bool:
+    """Return True when the reason is really an action phrase, not a motive."""
+    q = reason.strip().lower()
+    if not q:
+        return True
+    if re.fullmatch(r"\d+\s+days?", q, re.IGNORECASE):
+        return True
+    if not (q.startswith("borrow") or q.startswith("take")):
+        return False
+    equipment_keywords = (
+        "laptop",
+        "tablet",
+        "pc",
+        "computer",
+        "monitor",
+        "keyboard",
+        "mouse",
+        "headset",
+        "printer",
+        "equipment",
+        "home",
+    )
+    return any(keyword in q for keyword in equipment_keywords)
+
 # ---------------------------------------------------------------------------
 # Date normalization
 # ---------------------------------------------------------------------------
@@ -988,7 +1083,7 @@ def extract_draft_fields(
             start_date, end_date = _extract_leave_date_range(question)
             # Also look for duration like "for 3 days"
             duration = _extract_duration_days(question) if not start_date and not end_date else None
-            reason = _extract_reason(question)
+            reason = _sanitize_equipment_reason(question, _extract_equipment_reason(question))
             fields = {
                 "authorizationType": _AUTH_SUBTYPE_EQUIPMENT,
                 "equipmentType": equipment_type,
@@ -1002,6 +1097,8 @@ def extract_draft_fields(
                 missing.append("equipmentType")
             if start_date is None and duration is None:
                 missing.append("startDate")
+            if reason is None:
+                missing.append("reason")
             return fields, missing
 
         else:
@@ -1670,6 +1767,7 @@ def _repair_auth_fields_from_local(
         for key in ("equipmentType", "startDate", "endDate", "duration", "reason"):
             if repaired.get(key) is None and local_fields.get(key) is not None:
                 repaired[key] = local_fields[key]
+        repaired["reason"] = _sanitize_equipment_reason(question, repaired.get("reason"))
         # Remove TIME_PERMISSION-only keys that don't belong in EQUIPMENT_REQUEST
         for tp_key in ("absenceDate", "fromTime", "toTime"):
             repaired.pop(tp_key, None)
@@ -1682,11 +1780,13 @@ def _repair_auth_fields_from_local(
     # Recompute missingFields for the repaired shape
     missing: list[str] = []
     if resolved_auth_type == _AUTH_SUBTYPE_EQUIPMENT:
-        check_keys = ["authorizationType", "equipmentType", "startDate"]
+        check_keys = ["authorizationType", "equipmentType", "startDate", "reason"]
         if repaired.get("equipmentType") is None:
             missing.append("equipmentType")
         if repaired.get("startDate") is None and repaired.get("duration") is None:
             missing.append("startDate")
+        if repaired.get("reason") is None:
+            missing.append("reason")
     else:
         check_keys = ["authorizationType", "absenceDate", "fromTime", "toTime", "reason"]
         for key in check_keys:
