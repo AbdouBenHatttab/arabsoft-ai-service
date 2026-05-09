@@ -339,7 +339,9 @@ def test_equipment_request_gemini_invalid_reason_is_cleared():
     assert data["draftType"] == "AUTHORIZATION_REQUEST"
     assert data["draftFields"]["authorizationType"] == "EQUIPMENT_REQUEST"
     assert data["draftFields"]["equipmentType"] == "laptop"
-    assert data["draftFields"]["duration"] == "3 days"
+    assert "duration" not in data["draftFields"]
+    assert "duration" not in data["missingFields"]
+    assert "startDate" in data["missingFields"]
     assert data["draftFields"]["reason"] is None
     assert "reason" in data["missingFields"]
 
@@ -367,8 +369,30 @@ def test_equipment_request_gemini_valid_reason_is_preserved():
     assert data["draftType"] == "AUTHORIZATION_REQUEST"
     assert data["draftFields"]["authorizationType"] == "EQUIPMENT_REQUEST"
     assert data["draftFields"]["equipmentType"] == "laptop"
-    assert data["draftFields"]["duration"] == "3 days"
+    assert "duration" not in data["draftFields"]
+    assert "startDate" in data["missingFields"]
     assert data["draftFields"]["reason"] == "remote work"
+    assert "reason" not in data["missingFields"]
+
+
+def test_equipment_request_with_dates_exposes_dates_without_duration():
+    """
+    A proper equipment request with dates must keep dates and never expose a duration field.
+    """
+    data = post_chat(
+        "EMPLOYEE",
+        "I need to borrow a laptop from 20 May 2026 to 23 May 2026 for a client demo",
+    )
+
+    assert data["draftType"] == "AUTHORIZATION_REQUEST"
+    assert data["draftFields"]["authorizationType"] == "EQUIPMENT_REQUEST"
+    assert data["draftFields"]["equipmentType"] == "laptop"
+    assert data["draftFields"]["startDate"] == "2026-05-20"
+    assert data["draftFields"]["endDate"] == "2026-05-23"
+    assert "client demo" in data["draftFields"]["reason"].lower()
+    assert "duration" not in data["draftFields"]
+    assert "duration" not in data["missingFields"]
+    assert "startDate" not in data["missingFields"]
     assert "reason" not in data["missingFields"]
 
 

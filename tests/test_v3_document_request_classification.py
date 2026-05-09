@@ -15,7 +15,7 @@ Coverage:
   3.  "I need a leave balance statement"
       => DOCUMENT_REQUEST / LEAVE_BALANCE_STATEMENT
   4.  "I need a contract copy"
-      => DOCUMENT_REQUEST / CONTRACT_COPY (not hidden as Q&A)
+      => guidance only (HR-managed, not a normal employee document draft)
   5.  "Write me a formal letter requesting a salary certificate"
       => IMPROVE_TEXT (letter-writing intent = text generation, not platform submission)
   6.  "I need an experience certificate"
@@ -25,7 +25,7 @@ Coverage:
   8.  detect_drafting_intent returns True for all document request phrasings
   9.  _classify_draft_type returns DOCUMENT_REQUEST for document signals
   10. _extract_document_type returns enum names, not free-form strings
-  11. DOCUMENT_REQUEST draftFields has stable shape (documentType, purpose, extraDetails)
+  11. DOCUMENT_REQUEST draftFields has stable shape (documentType, notes)
   12. draftType is set to DOCUMENT_REQUEST (never IMPROVE_TEXT or LEAVE_REQUEST)
   13. Existing non-document drafts unaffected (LEAVE_REQUEST, LOAN_REQUEST, IMPROVE_TEXT)
   14. Gemini structuredFields with enum name used directly
@@ -194,19 +194,17 @@ def test_leave_balance_classifies_as_document_not_leave():
 # 4. Contract copy — must surface as DOCUMENT_REQUEST, not hidden
 # ===========================================================================
 
-def test_contract_copy_classified_as_document_request():
+def test_contract_copy_returns_guidance_not_document_request():
     """
-    CONTRACT_COPY is blocked by Spring Boot, but must still be classified as
-    DOCUMENT_REQUEST so React/Spring Boot can return the validation error.
-    Must NOT be silently dropped as generic Q&A.
+    CONTRACT_COPY is HR-managed. The assistant must not expose it as a normal
+    employee document draft card.
     """
     data = post_chat("I need a contract copy")
-    assert data["draftType"] == "DOCUMENT_REQUEST", (
-        f"Expected DOCUMENT_REQUEST, got {data['draftType']} (source={data['source']})"
-    )
-    assert data["draftFields"]["documentType"] == "CONTRACT_COPY", (
-        f"Expected CONTRACT_COPY, got {data['draftFields']['documentType']!r}"
-    )
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+    assert "contract copies are managed by hr" in data["answer"].lower()
+    assert "my documents" in data["answer"].lower()
 
 
 def test_contract_copy_intent_detected():
@@ -385,7 +383,6 @@ def test_document_request_draftfields_shape_via_extract():
     "I need a salary certificate for my bank",
     "I need an employment certificate",
     "I need a leave balance statement",
-    "I need a contract copy",
 ])
 def test_drafttype_is_document_request_not_other(question):
     data = post_chat(question)
@@ -394,6 +391,16 @@ def test_drafttype_is_document_request_not_other(question):
     )
     assert data["draftType"] != "IMPROVE_TEXT"
     assert data["draftType"] != "LEAVE_REQUEST"
+
+
+def test_contract_copy_is_guidance_not_document_request():
+    data = post_chat("I need a contract copy")
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
+    assert data["missingFields"] == []
+    answer = data["answer"].lower()
+    assert "contract copies are managed by hr" in answer
+    assert "my documents" in answer
 
 
 # ===========================================================================
@@ -592,21 +599,15 @@ def test_spec_3_unknown_document_missing_includes_documenttype():
 def test_spec_4_contract_copy_no_formal_letter():
     """
     Spec 4: "I need a contract copy"
-    => documentType CONTRACT_COPY
-    => missingFields []
-    => no formal letter draft
+    => guidance only
     """
     data = post_chat("I need a contract copy")
-    assert data["draftType"] == "DOCUMENT_REQUEST"
-    assert data["draftFields"]["documentType"] == "CONTRACT_COPY"
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
     assert data["missingFields"] == [], f"Expected [], got: {data['missingFields']}"
-    draft = data.get("draft")
-    assert draft is None or "Dear HR Team" not in (draft or ""), (
-        f"CONTRACT_COPY must not contain formal letter, got: {draft!r}"
-    )
-    assert draft is None or "[Your Name]" not in (draft or ""), (
-        f"CONTRACT_COPY must not contain template placeholders, got: {draft!r}"
-    )
+    answer = data["answer"].lower()
+    assert "contract copies are managed by hr" in answer
+    assert "my documents" in answer
 
 
 def test_spec_5_write_formal_letter_is_improve_text_with_draft():
@@ -789,15 +790,15 @@ def test_regression_salary_cert_platform_request_still_document_request():
     assert data["missingFields"] == []
 
 
-def test_regression_contract_copy_still_document_request():
+def test_regression_contract_copy_still_guidance_only():
     """
-    Spec 5 regression: "I need a contract copy"
-    => DOCUMENT_REQUEST / CONTRACT_COPY
+    Regression: contract copy remains guidance-only.
     """
     data = post_chat("I need a contract copy")
-    assert data["draftType"] == "DOCUMENT_REQUEST"
-    assert data["draftFields"]["documentType"] == "CONTRACT_COPY"
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
     assert data["missingFields"] == []
+    assert "contract copies are managed by hr" in data["answer"].lower()
 
 
 def test_regression_rephrase_still_generic_polish():
@@ -952,12 +953,13 @@ def test_regression_leave_balance_statement_unaffected():
     assert data["missingFields"] == []
 
 
-def test_regression_contract_copy_unaffected():
-    """Spec 4d: contract copy still works."""
+def test_regression_contract_copy_returns_guidance():
+    """Contract copy stays blocked from normal employee document drafting."""
     data = post_chat("I need a contract copy")
-    assert data["draftType"] == "DOCUMENT_REQUEST"
-    assert data["draftFields"]["documentType"] == "CONTRACT_COPY"
+    assert data["draftType"] is None
+    assert data["draftFields"] is None
     assert data["missingFields"] == []
+    assert "contract copies are managed by hr" in data["answer"].lower()
 
 
 def test_regression_write_formal_letter_still_improve_text():

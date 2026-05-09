@@ -2047,6 +2047,67 @@ def _expected_keys_for_type(draft_type: str) -> list[str]:
     return _EXPECTED.get(draft_type, [])
 
 
+def _sanitize_public_draft_response(question: str, response: ChatResponse) -> ChatResponse:
+    """
+    Normalize the assistant-facing draft response before React sees it.
+
+    This keeps internal extraction flexible while enforcing the public contract:
+    - equipment drafts never expose duration as a draft field
+    - contract copy is guidance-only, not a normal document draft
+    """
+    draft_type = getattr(response, "draftType", None)
+    draft_fields = getattr(response, "draftFields", None)
+
+    if draft_type == _TYPE_DOC and isinstance(draft_fields, dict):
+        document_type = draft_fields.get("documentType")
+        if document_type == "CONTRACT_COPY":
+            return ChatResponse(
+                answer=(
+                    "Contract copies are managed by HR. Check My Documents first. "
+                    "If the contract copy is not available there, contact HR or send "
+                    "a request/message asking HR to provide or upload it."
+                ),
+                warnings=[],
+                source=response.source or "local_rules",
+                draftType=None,
+                draftFields=None,
+                missingFields=[],
+            )
+
+    if draft_type == _TYPE_AUTH and isinstance(draft_fields, dict):
+        auth_type = draft_fields.get("authorizationType")
+        if auth_type == _AUTH_SUBTYPE_EQUIPMENT:
+            sanitized_fields = dict(draft_fields)
+            sanitized_fields.pop("duration", None)
+
+            sanitized_missing: list[str] = []
+            for field in getattr(response, "missingFields", []) or []:
+                if field != "duration" and field not in sanitized_missing:
+                    sanitized_missing.append(field)
+
+            if sanitized_fields.get("equipmentType") is None and "equipmentType" not in sanitized_missing:
+                sanitized_missing.append("equipmentType")
+            if sanitized_fields.get("startDate") is None and "startDate" not in sanitized_missing:
+                sanitized_missing.append("startDate")
+            if sanitized_fields.get("reason") is None and "reason" not in sanitized_missing:
+                sanitized_missing.append("reason")
+
+            response.draftFields = sanitized_fields
+            response.missingFields = sanitized_missing
+
+            duration = _extract_duration_days(question)
+            if duration and sanitized_fields.get("startDate") is None:
+                hint = (
+                    "You mentioned a duration, but ArabSoft equipment requests use a "
+                    "needed date and optional expected return date. Please provide "
+                    "those dates."
+                )
+                if hint not in response.warnings:
+                    response.warnings.append(hint)
+
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -2057,6 +2118,20 @@ def get_draft_response(request: ChatRequest) -> Optional[ChatResponse]:
 
     draft_type = _classify_draft_type(request.question)
     logger.debug("Drafting intent detected. draftType=%s", draft_type)
+
+    if draft_type == _TYPE_DOC and _extract_document_type(request.question) == "CONTRACT_COPY":
+        return ChatResponse(
+            answer=(
+                "Contract copies are managed by HR. Check My Documents first. "
+                "If the contract copy is not available there, contact HR or send "
+                "a request/message asking HR to provide or upload it."
+            ),
+            warnings=[],
+            source="local_rules",
+            draftType=None,
+            draftFields=None,
+            missingFields=[],
+        )
 
     # Blocked legacy types: TRAINING, BUSINESS_TRIP, MISSION
     # Return a safe assistant message; do NOT create any draft.
@@ -2081,6 +2156,7 @@ def get_draft_response(request: ChatRequest) -> Optional[ChatResponse]:
 
     gemini_result = _call_gemini_for_draft(request.question, draft_type)
     if gemini_result is not None:
-        return gemini_result
+        return _sanitize_public_draft_response(request.question, gemini_result)
 
-    return _local_draft(request.question, draft_type)
+    local_result = _local_draft(request.question, draft_type)
+    return _sanitize_public_draft_response(request.question, local_result)
