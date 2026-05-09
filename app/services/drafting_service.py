@@ -33,7 +33,9 @@ Invariants:
     Only normalize when input is unambiguously numeric (e.g. "2026-05-12").
   - draftFields uses a stable shape with null values for missing fields for all
     structured types. draftFields=null only for IMPROVE_TEXT.
-  - missingFields lists every field that could not be extracted.
+  - missingFields lists every required field that could not be extracted.
+    For LOAN_REQUEST, repaymentMonths is optional: extract it when mentioned,
+    but do not add it to missingFields when absent.
   - relatedPages is always [] for drafting responses.
   - Always includes a review disclaimer in the response (except IMPROVE_TEXT).
   - source="external_ai"  when Gemini produces the draft text.
@@ -139,6 +141,21 @@ _DRAFT_SUBJECTS: list[str] = [
     "loan justification",
     "loan reason",
     "loan application",
+    "housing loan",
+    "home loan",
+    "housing advance",
+    "medical advance",
+    "medical loan",
+    "education loan",
+    "emergency loan",
+    "personal advance",
+    "personal loan",
+    "salary advance",
+    "salary loan",
+    "home renovation",
+    "home repair",
+    "house renovation",
+    "house repair",
     "authorization request",
     "authorization explanation",
     "authorization justification",
@@ -340,7 +357,17 @@ def _classify_draft_type(question: str) -> str:
     if _detect_time_permission(q):
         return _TYPE_AUTH
 
-    if "loan" in q:
+    if "loan" in q or any(sig in q for sig in [
+        "housing advance",
+        "medical advance",
+        "medical loan",
+        "education loan",
+        "emergency loan",
+        "personal advance",
+        "personal loan",
+        "salary advance",
+        "salary loan",
+    ]):
         return _TYPE_LOAN
 
     if (
@@ -838,6 +865,21 @@ def _extract_reason(text: str) -> Optional[str]:
     return None
 
 
+_LOAN_REASON_REPAYMENT_SUFFIX_RE = re.compile(
+    r"\s+(?:over|repay\s+over|for|in)\s+\d{1,3}\s+months?\b.*$",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_loan_reason(raw_reason: Optional[str]) -> Optional[str]:
+    """Strip repayment-period text that should stay in repaymentMonths, not reason."""
+    if raw_reason is None:
+        return None
+    reason = str(raw_reason).strip().rstrip(".!?;")
+    reason = _LOAN_REASON_REPAYMENT_SUFFIX_RE.sub("", reason).strip()
+    return reason or None
+
+
 def _extract_amount(text: str) -> Optional[str]:
     for m in _AMOUNT_PATTERN.finditer(text):
         val = m.group(1).strip().rstrip(",.")
@@ -1054,7 +1096,7 @@ def extract_draft_fields(
     if draft_type == _TYPE_LOAN:
         amount = _extract_amount(question)
         loan_type = _extract_loan_type(question)
-        reason = _extract_reason(question)
+        reason = _sanitize_loan_reason(_extract_reason(question))
         repayment_months = _extract_repayment_months(question)
         fields = {
             "amount": amount,
@@ -1069,8 +1111,6 @@ def extract_draft_fields(
             missing.append("loanType")
         if reason is None:
             missing.append("reason")
-        if repayment_months is None:
-            missing.append("repaymentMonths")
         return fields, missing
 
     if draft_type == _TYPE_AUTH:
@@ -1170,11 +1210,10 @@ _LOCAL_TEMPLATES: dict[str, str] = {
         "Subject: Loan Request Justification — [Your Name]\n\n"
         "Dear HR Team,\n\n"
         "I am respectfully submitting a loan request in the amount of [amount] "
-        "to be repaid over [repayment period].\n\n"
+        "to be repaid over [repayment period if specified].\n\n"
         "Purpose: [Briefly describe the reason, e.g., medical expenses, home repairs, "
         "educational fees — do not include sensitive personal details unless required].\n\n"
-        "I confirm that I am aware of the repayment terms and conditions and I agree to "
-        "the applicable deduction schedule.\n\n"
+        "HR will confirm the repayment terms later, and I agree to the applicable deduction schedule once reviewed.\n\n"
         "Thank you for your consideration.\n\n"
         "Regards,\n[Your Name]"
     ),
@@ -1211,6 +1250,12 @@ _LOCAL_TEMPLATES["loan_justification"] = _LOCAL_TEMPLATES[_TYPE_LOAN]
 _LOCAL_TEMPLATES["authorization"] = _LOCAL_TEMPLATES[_TYPE_AUTH]
 _LOCAL_TEMPLATES["document_request"] = _LOCAL_TEMPLATES[_TYPE_DOC]
 _LOCAL_TEMPLATES["improve_text"] = _LOCAL_TEMPLATES[_TYPE_IMPROVE]
+
+
+def _loan_draft_answer_label(loan_type: Optional[str]) -> str:
+    if loan_type == "HOUSING_ADVANCE":
+        return "housing loan request"
+    return "loan request"
 
 
 # ---------------------------------------------------------------------------
@@ -1421,12 +1466,18 @@ def _local_draft(question: str, draft_type: str) -> ChatResponse:
     draft_text = template + _REVIEW_DISCLAIMER
 
     draft_fields, missing_fields = extract_draft_fields(question, draft_type)
-
-    return ChatResponse(
-        answer=(
+    if draft_type == _TYPE_LOAN:
+        draft_fields, missing_fields = _normalize_loan_draft_fields(draft_fields, missing_fields)
+        answer_label = _loan_draft_answer_label((draft_fields or {}).get("loanType"))
+        answer = f"Here is a draft for your {answer_label}. Please review the details."
+    else:
+        answer = (
             "Here is a template draft you can personalise before submitting. "
             "Fill in the bracketed placeholders with your actual details."
-        ),
+        )
+
+    return ChatResponse(
+        answer=answer,
         draft=draft_text,
         warnings=[
             "This is a locally generated template. Review all details before submitting."
@@ -1696,7 +1747,7 @@ def _resolve_structured_fields(
             if draft_type == _TYPE_LEAVE and key in ("startDate", "endDate") and val is not None:
                 val = normalize_date_to_iso(val)
             fields[key] = val
-            if val is None:
+            if val is None and not (draft_type == _TYPE_LOAN and key == "repaymentMonths"):
                 missing.append(key)
 
         # Safety guard: reject Gemini-inferred leaveType for generic absence language
@@ -1714,6 +1765,7 @@ def _resolve_structured_fields(
             fields, missing = _repair_auth_fields_from_local(question, fields, missing)
         elif draft_type == _TYPE_LOAN:
             fields, missing = _repair_loan_fields_from_local(question, fields, missing)
+            fields, missing = _normalize_loan_draft_fields(fields, missing)
 
         return fields, missing
 
@@ -1721,7 +1773,10 @@ def _resolve_structured_fields(
         "Gemini structuredFields absent or invalid for type=%s; using local extractor.",
         draft_type,
     )
-    return extract_draft_fields(question, draft_type)
+    fields, missing = extract_draft_fields(question, draft_type)
+    if draft_type == _TYPE_LOAN:
+        fields, missing = _normalize_loan_draft_fields(fields, missing)
+    return fields, missing
 
 
 def _repair_auth_fields_from_local(
@@ -1827,6 +1882,32 @@ def _normalize_loan_amount_value(raw: object) -> Optional[int | float]:
     return int(value) if value.is_integer() else value
 
 
+def _normalize_loan_draft_fields(
+    fields: Optional[dict],
+    missing: list[str],
+) -> tuple[Optional[dict], list[str]]:
+    """
+    Normalize loan draft values so the assistant preview and submit payload
+    always work with numeric amount and repaymentMonths values when possible.
+    """
+    if not isinstance(fields, dict):
+        return fields, missing
+
+    normalized = dict(fields)
+
+    amount = _normalize_loan_amount_value(normalized.get("amount"))
+    if amount is not None:
+        normalized["amount"] = amount
+
+    repayment = normalized.get("repaymentMonths")
+    if isinstance(repayment, str):
+        parsed = _normalize_loan_amount_value(repayment)
+        if isinstance(parsed, int) and 1 <= parsed <= 120:
+            normalized["repaymentMonths"] = parsed
+
+    return normalized, missing
+
+
 def _repair_loan_fields_from_local(
     question: str,
     gemini_fields: dict,
@@ -1860,11 +1941,10 @@ def _repair_loan_fields_from_local(
     current_loan_type = repaired.get("loanType")
     current_reason = repaired.get("reason")
     current_repayment = repaired.get("repaymentMonths")
-
     needs_loan_type_repair = current_loan_type not in supported_loan_types
     needs_reason_repair = current_reason is None
-    needs_repayment_repair = not isinstance(current_repayment, int) or not (1 <= current_repayment <= 120)
     needs_amount_repair = current_amount is None or needs_loan_type_repair
+    needs_repayment_repair = current_repayment is None or not isinstance(current_repayment, int)
 
     repair_needed = (
         needs_amount_repair
@@ -1897,13 +1977,15 @@ def _repair_loan_fields_from_local(
         local_repayment = local_fields.get("repaymentMonths")
         if isinstance(local_repayment, int) and 1 <= local_repayment <= 120:
             repaired["repaymentMonths"] = local_repayment
-        elif isinstance(current_repayment, str):
+        elif isinstance(local_repayment, str):
             try:
-                parsed = int(current_repayment.strip())
+                parsed = int(local_repayment.strip())
             except ValueError:
                 parsed = None
             if parsed is not None and 1 <= parsed <= 120:
                 repaired["repaymentMonths"] = parsed
+            elif local_repayment == "":
+                repaired["repaymentMonths"] = None
 
     missing: list[str] = []
     if repaired.get("amount") is None:
@@ -1913,9 +1995,21 @@ def _repair_loan_fields_from_local(
         missing.append("loanType")
     if repaired.get("reason") is None:
         missing.append("reason")
-    if not isinstance(repaired.get("repaymentMonths"), int):
+
+    repayment = repaired.get("repaymentMonths")
+    if isinstance(repayment, str):
+        try:
+            parsed = int(repayment.strip())
+        except ValueError:
+            parsed = None
+        if parsed is not None and 1 <= parsed <= 120:
+            repaired["repaymentMonths"] = parsed
+        elif repayment == "":
+            repaired["repaymentMonths"] = None
+        else:
+            repaired["repaymentMonths"] = None
+    elif repayment is not None and not isinstance(repayment, int):
         repaired["repaymentMonths"] = None
-        missing.append("repaymentMonths")
 
     return repaired, missing
 

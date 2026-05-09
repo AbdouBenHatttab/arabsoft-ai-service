@@ -43,7 +43,7 @@ import httpx
 
 from app.main import app
 from app.schemas import ChatRequest, ContextInfo
-from app.services.drafting_service import detect_drafting_intent, get_draft_response
+from app.services.drafting_service import detect_drafting_intent, get_draft_response, _classify_draft_type
 
 client = TestClient(app)
 
@@ -93,6 +93,14 @@ def test_detect_drafting_intent_loan_justification():
     assert detect_drafting_intent("Write a professional loan justification") is True
 
 
+def test_detect_drafting_intent_housing_loan_request():
+    assert detect_drafting_intent("I need a housing loan of 500 TND for home renovation over 12 months") is True
+
+
+def test_detect_drafting_intent_medical_advance_request():
+    assert detect_drafting_intent("I need a medical advance of 300 TND for treatment over 6 months") is True
+
+
 def test_detect_drafting_intent_authorization():
     assert detect_drafting_intent("Draft an authorization request explanation") is True
 
@@ -125,6 +133,14 @@ def test_detect_drafting_intent_false_for_team_question():
 def test_detect_drafting_intent_false_for_approve():
     """Even though 'approve' is in the question, no drafting subject -> False."""
     assert detect_drafting_intent("approve my leave automatically") is False
+
+
+def test_classify_draft_type_housing_loan_is_loan_request():
+    assert _classify_draft_type("I need a housing loan of 500 TND for home renovation over 12 months") == "LOAN_REQUEST"
+
+
+def test_classify_draft_type_medical_advance_is_loan_request():
+    assert _classify_draft_type("I need a medical advance of 300 TND for treatment over 6 months") == "LOAN_REQUEST"
 
 
 # ---------------------------------------------------------------------------

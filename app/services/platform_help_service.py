@@ -286,8 +286,9 @@ def get_platform_help(request: ChatRequest) -> Optional[ChatResponse]:
     #   9. _handle_working_time                  working hours / weekends / public holidays.
     #  10. _handle_request_status               request status / tracking.
     #  11. _handle_platform_overview            "what can I do" overview.
-    #  12. _handle_loan                          loan navigation.
-    #  13. _handle_leave_request                 leave submission guidance.
+    #  12. _handle_loan_process                  loan rules / process guidance.
+    #  13. _handle_loan                          loan navigation.
+    #  14. _handle_leave_request                 leave submission guidance.
     #      NOTE: _handle_working_time MUST be before _handle_leave_request so that
     #      "weekends count in leave" is caught by working-time, not leave-request.
     #  14. _handle_hr_user_setup                 HR user management (create, activate, roles).
@@ -307,6 +308,7 @@ def get_platform_help(request: ChatRequest) -> Optional[ChatResponse]:
         _handle_working_time,                   # working hours / weekends / public holidays
         _handle_request_status,                 # request status tracking
         _handle_platform_overview,              # "what can I do" platform overview
+        _handle_loan_process,                   # loan rules / process explanation
         _handle_loan,
         _handle_leave_request,                  # MUST stay after _handle_working_time
         _handle_hr_user_setup,
@@ -1328,6 +1330,56 @@ def _handle_platform_overview(
 # Loan handler
 # ---------------------------------------------------------------------------
 
+_LOAN_PROCESS_PHRASES: tuple[str, ...] = (
+    "loan rules",
+    "loan rule",
+    "loan process",
+    "loan workflow",
+    "loan requirements",
+    "loan requirement",
+    "how does the loan process work",
+    "how do the loan rules work",
+    "how does a loan work",
+    "loan eligibility",
+)
+
+
+def _handle_loan_process(q: str, role: str, request: ChatRequest) -> Optional[ChatResponse]:
+    """
+    Explain the overall loan process and high-level rules without creating a draft.
+    """
+    if not any(phrase in q for phrase in _LOAN_PROCESS_PHRASES):
+        return None
+
+    if role in ("EMPLOYEE", "TEAM_LEADER"):
+        return ChatResponse(
+            answer=(
+                "To request a loan, submit the loan type, amount, and reason. "
+                "A repayment period is optional at the initial submission stage. "
+                "ArabSoft then checks your salary, seniority, maximum amount, and whether you already have a pending or active loan. "
+                "HR reviews the request, may schedule a meeting if needed, and confirms the repayment terms later before approving or rejecting the request. "
+                "You will receive an in-app notification and email when there is an update."
+            ),
+            relatedPages=[
+                RelatedPage(label="My Loans", route="/employee/loans"),
+            ],
+        )
+
+    if role == "HR_MANAGER":
+        return ChatResponse(
+            answer=(
+                "Loan requests are submitted by the employee with the loan type, amount, and reason. "
+                "The system checks salary, seniority, amount limits, and any pending or active loan before HR reviews it. "
+                "HR may schedule a meeting, confirm the repayment terms later, and then approve or reject the request."
+            ),
+            relatedPages=[
+                RelatedPage(label="All HR Requests", route="/hr/requests"),
+            ],
+        )
+
+    return None
+
+
 def _handle_loan(q: str, role: str, request: ChatRequest) -> Optional[ChatResponse]:
     """
     EMPLOYEE / TEAM_LEADER: personal loan guidance -> /employee/loans
@@ -1339,8 +1391,13 @@ def _handle_loan(q: str, role: str, request: ChatRequest) -> Optional[ChatRespon
     if role in ("EMPLOYEE", "TEAM_LEADER"):
         return ChatResponse(
             answer=(
-                "To request a loan, go to the Loans section under your personal requests. "
-                "Fill in the loan request form and submit — HR will review and process it."
+                "Go to My Loans / Loans & Advances and click New Request. "
+                "Fill in the loan type, amount, and reason, then submit the request. "
+                "You do not need to set the repayment period at this stage.\n\n"
+                "ArabSoft checks the request against eligibility rules such as salary, seniority, "
+                "maximum allowed amount, and any active or pending loan. HR reviews the request, "
+                "may schedule a meeting to discuss the request and repayment terms, and makes the "
+                "final decision. You will receive an in-app notification and email when there is an update."
             ),
             relatedPages=[
                 RelatedPage(label="My Loans", route="/employee/loans"),

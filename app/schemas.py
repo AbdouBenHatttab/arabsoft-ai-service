@@ -155,6 +155,8 @@ class ChatResponse(BaseModel):
     #              None for all non-drafting responses (backward-compatible).
     # draftFields — extracted field values keyed by field name.
     #              Stable shape per draftType; null values for unextracted fields.
+    #              For LOAN_REQUEST, repaymentMonths is optional and omitted from
+    #              missingFields when the user does not specify a repayment period.
     #              None only for IMPROVE_TEXT (no structured fields apply).
     # missingFields — list of field names that could not be extracted from the
     #              user's input. Empty list for non-drafting and IMPROVE_TEXT.

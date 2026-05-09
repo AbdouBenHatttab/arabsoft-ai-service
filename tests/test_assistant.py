@@ -112,8 +112,54 @@ def test_employee_loan_help():
     })
     assert response.status_code == 200
     data = response.json()
-    assert "loan" in data["answer"].lower()
+    answer_lower = data["answer"].lower()
+    assert data["draftType"] is None
+    assert "my loans" in answer_lower or "loans & advances" in answer_lower
+    assert "new request" in answer_lower
+    assert "hr reviews" in answer_lower or "hr review" in answer_lower
+    assert "meeting" in answer_lower
+    assert "repayment terms" in answer_lower or "repayment period" in answer_lower
+    assert "notification" in answer_lower or "email" in answer_lower
+    assert "your salary" not in answer_lower
+    assert "your seniority" not in answer_lower
+    assert "your maximum" not in answer_lower
+    assert "your active loan" not in answer_lower
     assert data["aiGenerated"] is True
+
+
+def test_employee_loan_rules_returns_qna():
+    response = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "What are the loan rules?",
+        "context": {},
+    })
+    assert response.status_code == 200
+    data = response.json()
+    answer_lower = data["answer"].lower()
+    assert data["draftType"] is None
+    assert "loan type" in answer_lower
+    assert "amount" in answer_lower
+    assert "reason" in answer_lower
+    assert "repayment period is optional" in answer_lower or "repayment period" in answer_lower
+    assert "pending or active loan" in answer_lower
+    assert "hr reviews" in answer_lower or "hr review" in answer_lower
+
+
+def test_employee_loan_process_returns_qna():
+    response = client.post("/assistant/chat", json={
+        "role": "EMPLOYEE",
+        "question": "How does the loan process work?",
+        "context": {},
+    })
+    assert response.status_code == 200
+    data = response.json()
+    answer_lower = data["answer"].lower()
+    assert data["draftType"] is None
+    assert "loan type" in answer_lower
+    assert "repayment period is optional" in answer_lower
+    assert "repayment terms later" in answer_lower
+    assert "pending or active loan" in answer_lower
+    assert "notification" in answer_lower or "email" in answer_lower
 
 
 def test_employee_loan_route_is_employee_loans():
